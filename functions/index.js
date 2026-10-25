@@ -1,7 +1,7 @@
 const functions = require('firebase-functions'); // firebase-functions v7 = gen2 API
 const admin = require('firebase-admin');
 const bcrypt = require('bcryptjs');
-const { onDocumentWritten } = require('firebase-functions/v2/firestore');
+const { onDocumentWritten, onDocumentCreated } = require('firebase-functions/v2/firestore');
 
 admin.initializeApp();
 
@@ -3940,4 +3940,142 @@ exports.submitCorrectionServer = functions.https.onCall(async (request) => {
 
     console.log(`[submitCorrectionServer] Successfully processed correction ${cleanToken} for ${reqData.targetId}`);
     return { success: true };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLOUD-2: ONBOARDING SUBMISSION SERVER TRIGGER & PIPELINE
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * onSubmissionCreated (CLOUD-2)
+ * Triggered on Firestore when a new document is created in /onboarding_submissions/{submissionId}.
+ * Executes guaranteed server-side duplicate detection, audit logging, and draft cleanup.
+ */
+exports.onSubmissionCreated = onDocumentCreated("onboarding_submissions/{submissionId}", async (event) => {
+    const submissionId = event.params.submissionId;
+    const snap = event.data;
+    if (!snap) return;
+
+    const data = snap.data() || {};
+    const db = admin.firestore();
+    console.log(`[TRIGGER: onSubmissionCreated] Processing new submission ${submissionId}...`);
+
+    try {
+        const formData = data.formData || data.data || {};
+
+        // 1. Extract candidate identifiers
+        const candidateAadhaar = String(
+            data.aadhaar || data.aadhaarNumber || formData.aadhaar || formData.aadhaarNumber ||
+            formData['18855ee9-0d66-41d6-988b-128b776a8c5b'] || ''
+        ).replace(/\s+/g, '').trim();
+
+        const candidatePan = String(
+            data.pan || data.panNumber || formData.pan || formData.panNumber ||
+            formData['da8edb18-4bed-41ca-8233-2280b97dac8d'] || ''
+        ).toUpperCase().trim();
+
+        const candidatePhone = String(
+            data.phone || data.contactNumber || formData.phone || formData.contactNumber ||
+            formData['eb3617dc-9f1d-475d-a2db-005b6bc2500c'] || ''
+        ).replace(/[^\d]/g, '').slice(-10);
+
+        let candidateEmail = String(
+            data.linkedGoogleEmail || data.email || formData.email || formData.applicantEmail || ''
+        ).toLowerCase().trim();
+
+        const checks = [
+            { field: 'Aadhaar Card', value: candidateAadhaar, queryFields: ['aadhaar', 'aadhaarNumber', 'data.18855ee9-0d66-41d6-988b-128b776a8c5b', 'profileData.18855ee9-0d66-41d6-988b-128b776a8c5b'] },
+            { field: 'PAN Card', value: candidatePan, queryFields: ['pan', 'panNumber', 'data.da8edb18-4bed-41ca-8233-2280b97dac8d', 'profileData.da8edb18-4bed-41ca-8233-2280b97dac8d'] },
+            { field: 'Contact Number', value: candidatePhone, queryFields: ['phone', 'contactNumber', 'data.eb3617dc-9f1d-475d-a2db-005b6bc2500c', 'profileData.eb3617dc-9f1d-475d-a2db-005b6bc2500c'] },
+            { field: 'Email', value: candidateEmail, queryFields: ['email', 'linkedGoogleEmail', 'applicantEmail'] }
+        ].filter(c => c.value && c.value.length >= 5);
+
+        // 2. Server-side Duplicate Checks
+        const duplicateMatches = [];
+        for (const check of checks) {
+            for (const qf of check.queryFields) {
+                // Check employees
+                const empSnap = await db.collection('employees').where(qf, '==', check.value).limit(1).get();
+                if (!empSnap.empty) {
+                    const emp = empSnap.docs[0].data();
+                    if (!emp.deletedAt) {
+                        const isRelieved = emp.isRelieved === true || emp.isActive === false;
+                        const empId = emp.employeeId || emp.portalId || empSnap.docs[0].id;
+                        const empName = emp.applicantName || 'Employee';
+                        const siteName = emp.siteName || emp.currentSiteId || 'N/A';
+
+                        if (!isRelieved) {
+                            duplicateMatches.push({
+                                matchType: 'EXISTING_ACTIVE_EMPLOYEE',
+                                matchedField: check.field,
+                                matchedValue: check.value,
+                                matchedId: empId,
+                                matchedName: empName,
+                                matchedSite: siteName,
+                                details: `Active employee (${empId} - ${empName}) already exists with this ${check.field}.`
+                            });
+                        } else {
+                            duplicateMatches.push({
+                                matchType: 'EX_EMPLOYEE_REHIRE',
+                                matchedField: check.field,
+                                matchedValue: check.value,
+                                matchedId: empId,
+                                matchedName: empName,
+                                matchedSite: siteName,
+                                relievingDate: emp.relievingDate || 'N/A',
+                                details: `Ex-employee (${empId} - ${empName}) relieved on ${emp.relievingDate || 'N/A'}.`
+                            });
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 3. Stamp duplicate matches if found
+        const updates = {};
+        if (duplicateMatches.length > 0) {
+            updates.duplicateMatches = duplicateMatches;
+            console.log(`[TRIGGER: onSubmissionCreated] Stamped ${duplicateMatches.length} duplicate matches on ${submissionId}`);
+        }
+
+        // 4. Server-Side Draft Cleanup
+        const draftsToDelete = new Set([submissionId]);
+        if (candidateEmail) {
+            const draftsSnap = await db.collection('draft_submissions').where('ownerEmail', '==', candidateEmail).limit(10).get();
+            draftsSnap.docs.forEach(d => draftsToDelete.add(d.id));
+        }
+        if (data.ownerUid) {
+            const draftsSnap2 = await db.collection('draft_submissions').where('ownerUid', '==', data.ownerUid).limit(10).get();
+            draftsSnap2.docs.forEach(d => draftsToDelete.add(d.id));
+        }
+
+        for (const dId of draftsToDelete) {
+            try {
+                await db.collection('draft_submissions').doc(dId).delete();
+                console.log(`[TRIGGER: onSubmissionCreated] Cleaned up draft ${dId}`);
+            } catch (delErr) {
+                // Non-fatal
+            }
+        }
+
+        // 5. Append-only server audit log
+        await db.collection('audit_logs').add({
+            action: 'SUBMIT',
+            module: 'ONBOARDING',
+            targetId: submissionId,
+            actorId: data.ownerUid || data.linkedUid || 'candidate',
+            actorName: data.applicantName || 'Candidate',
+            details: `New onboarding application submitted for ${data.applicantName || 'Candidate'} (${submissionId})`,
+            timestamp: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        if (Object.keys(updates).length > 0) {
+            await snap.ref.update(updates);
+        }
+
+        console.log(`[TRIGGER: onSubmissionCreated] Successfully processed ${submissionId}`);
+    } catch (err) {
+        console.error(`[TRIGGER: onSubmissionCreated] Error processing ${submissionId}:`, err);
+    }
 });

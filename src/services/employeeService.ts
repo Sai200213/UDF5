@@ -1038,19 +1038,7 @@ export const submitEmployeeForm = async (
         // Mark finalizing step as done immediately (candidate never waits)
         onProgress?.('finalizing', 'done');
 
-        // Detached background pipeline: Auto-sync to Google Drive + Google Form in background
-        // 1. Immediately trigger Google Form sync first (fast ~1.5s execution, ensures Google Sheet row is recorded even if user exits!)
-        setTimeout(async () => {
-            try {
-                log.log(`[BACKGROUND_PIPELINE] Immediately syncing to Google Form for ${submissionId}...`);
-                await syncSubmissionToGoogleForm(submissionId);
-                log.log(`[BACKGROUND_PIPELINE] ✅ Immediate Google Form sync completed for ${submissionId}`);
-            } catch (formErr) {
-                console.warn(`[BACKGROUND_PIPELINE] Immediate Google Form sync error for ${submissionId}:`, formErr);
-            }
-        }, 50);
-
-        // 2. Drive file backup in background
+        // Detached background pipeline: Sync files to Google Drive first so Drive links are saved on the submission, then sync to Google Form
         setTimeout(async () => {
             try {
                 log.log(`[BACKGROUND_PIPELINE] Starting background Drive backup for ${submissionId}...`);
@@ -1058,8 +1046,16 @@ export const submitEmployeeForm = async (
                 log.log(`[BACKGROUND_PIPELINE] ✅ Completed background Drive backup for ${submissionId}`);
             } catch (syncErr) {
                 console.warn(`[BACKGROUND_PIPELINE] Background Drive sync error for ${submissionId}:`, syncErr);
+            } finally {
+                try {
+                    log.log(`[BACKGROUND_PIPELINE] Syncing submission (with Drive links) to Google Form for ${submissionId}...`);
+                    await syncSubmissionToGoogleForm(submissionId);
+                    log.log(`[BACKGROUND_PIPELINE] ✅ Google Form sync completed for ${submissionId}`);
+                } catch (formErr) {
+                    console.warn(`[BACKGROUND_PIPELINE] Google Form sync error for ${submissionId}:`, formErr);
+                }
             }
-        }, 200);
+        }, 100);
 
         return submissionId;
     } catch (error) {
