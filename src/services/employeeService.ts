@@ -5019,15 +5019,21 @@ export const submitCorrectionResponse = async (
             }
         }
         
-        // Also update applicantName if name field was updated
+        // Only update applicantName if an actual name field was modified in processedData
         const combinedForm = { ...(targetData.formData || {}), ...processedData };
-        if (sectionsToUse.length > 0) {
+        const nameFieldUpdated = Object.keys(processedData).some(k =>
+            /name|first_?name|last_?name|full_?name/i.test(k) ||
+            sectionsToUse.some((s: any) => s.fields?.some((f: any) => f.id === k && /name/i.test(f.label || '')))
+        );
+        if (sectionsToUse.length > 0 && nameFieldUpdated) {
             const newName = getApplicantName(combinedForm, sectionsToUse);
-            if (newName && newName !== targetData.applicantName) {
+            if (newName && newName !== 'Unknown' && newName !== targetData.applicantName) {
                 updates.applicantName = newName;
                 updates.driveFolderName = `${req.targetId} - ${newName}`;
             }
+        }
 
+        if (sectionsToUse.length > 0) {
             // Re-extract updated identifiers
             const updatedPAN = getApplicantPAN(combinedForm, sectionsToUse);
             const updatedAadhaar = getApplicantAadhaar(combinedForm, sectionsToUse);

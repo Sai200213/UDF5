@@ -9,6 +9,7 @@ import { CheckCircle, XCircle, Eye, Clock, History, Info, UserMinus, Calendar, S
 import { getEmployeeLookupMap } from '../src/services/employeeService';
 import { getEffectiveApprovalLevel, isRoleAssignedToSite } from '../src/utils/workflowHelper';
 import { useData } from '../src/contexts/DataContext';
+import SecureDocumentLink from '../src/components/common/SecureDocumentLink';
 
 interface AdminResignationManagementPageProps {
   resignationRequests: ResignationRequest[];
@@ -204,9 +205,19 @@ const AdminResignationManagementPage: React.FC<AdminResignationManagementPagePro
             </div>
 
             {selectedRequest.document && (
-              <div className="p-3 bg-blue-50 border border-blue-100 rounded-md flex items-center">
-                <CheckCircle size={16} className="text-blue-500 mr-2" />
-                <span className="text-sm text-blue-700 font-medium">{selectedRequest.document.name} (Uploaded)</span>
+              <div className="p-3 bg-blue-50 border border-blue-100 rounded-md flex items-center justify-between">
+                <div className="flex items-center">
+                  <CheckCircle size={16} className="text-blue-500 mr-2" />
+                  <span className="text-sm text-blue-700 font-medium">
+                    {typeof selectedRequest.document === 'string' ? 'Resignation Letter Attached' : ((selectedRequest.document as any).name || 'Resignation Letter')}
+                  </span>
+                </div>
+                <SecureDocumentLink
+                  path={typeof selectedRequest.document === 'string' ? selectedRequest.document : (selectedRequest.document as any).url}
+                  className="text-sm font-semibold text-blue-600 hover:text-blue-800 underline"
+                >
+                  View Document
+                </SecureDocumentLink>
               </div>
             )}
 

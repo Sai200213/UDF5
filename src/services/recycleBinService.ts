@@ -266,12 +266,21 @@ export async function permanentDeleteFromRecycleBin(recycleBinItemId: string): P
   const snap = await getDoc(binDocRef);
   if (snap.exists()) {
     const binData = snap.data();
-    if (binData.itemType === 'STAFF' && binData.originalId) {
+    const originalId = binData.originalId;
+    if (originalId) {
       try {
-        const { deleteStaffUser } = await import('./staffService');
-        await deleteStaffUser(binData.originalId);
-      } catch (authErr) {
-        console.warn('Could not delete Firebase Auth user during permanent purge:', authErr);
+        if (binData.itemType === 'STAFF') {
+          const { deleteStaffUser } = await import('./staffService');
+          await deleteStaffUser(originalId);
+        } else if (binData.itemType === 'EMPLOYEE') {
+          const { permanentDeleteEmployee } = await import('./employeeService');
+          await permanentDeleteEmployee(originalId);
+        } else if (binData.itemType === 'SUBMISSION') {
+          const { deleteSubmission } = await import('./employeeService');
+          await deleteSubmission(originalId);
+        }
+      } catch (purgeErr) {
+        console.warn(`Could not purge underlying ${binData.itemType} (${originalId}):`, purgeErr);
       }
     }
   }
@@ -285,7 +294,7 @@ export async function emptyRecycleBin(): Promise<number> {
   const snap = await getDocs(collection(db, RECYCLE_BIN_COLLECTION));
   let count = 0;
   for (const d of snap.docs) {
-    await deleteDoc(d.ref);
+    await permanentDeleteFromRecycleBin(d.id);
     count++;
   }
   return count;

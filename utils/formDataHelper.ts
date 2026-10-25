@@ -43,15 +43,6 @@ export const getApplicantName = (
   if (firstName) return firstName;
   if (lastName) return lastName;
 
-  // Fallback: try to find first non-empty string field if no common name field found
-  for (const section of formSections) {
-    for (const field of section.fields) {
-      if (typeof formData[field.id] === 'string' && (formData[field.id] as string).trim() !== '') {
-        return (formData[field.id] as string).trim();
-      }
-    }
-  }
-
   return 'N/A';
 };
 

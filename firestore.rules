@@ -183,6 +183,7 @@ service cloud.firestore {
     // ─── Employee Records ────────────────────────────────────────────────────
     match /employees/{userId} {
       allow get: if resource == null ||
+                    hasActiveCorrectionToken(resource.data) ||
                     isSelfEmployee(userId, resource.data) || 
                     (isAdmin() && canStaffViewSite(resource.data.get('currentSiteId', resource.data.get('siteId', ''))));
       allow list: if isAdmin() || (isAuthenticated() && (
@@ -215,6 +216,7 @@ service cloud.firestore {
     // ─── Onboarding Submissions ──────────────────────────────────────────────
     match /onboarding_submissions/{id} {
       allow get: if resource == null ||
+                    hasActiveCorrectionToken(resource.data) ||
                     isSelfSubmission(resource.data) || 
                     (isAdmin() && canStaffViewSite(resource.data.get('siteId', '')));
       allow list: if isAdmin() || (isAuthenticated() && (

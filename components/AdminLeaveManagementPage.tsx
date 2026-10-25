@@ -13,6 +13,7 @@ import { getEmployeeLookupMap, } from '../src/services/employeeService';
 import { fetchLeaveRequestsByStatus } from '../src/services/requestService';
 import { getEffectiveApprovalLevel, isRoleAssignedToSite } from '../src/utils/workflowHelper';
 import { useData } from '../src/contexts/DataContext';
+import SecureDocumentLink from '../src/components/common/SecureDocumentLink';
 
 interface AdminLeaveManagementPageProps {
     leaveRequests: LeaveRequest[];
@@ -341,6 +342,20 @@ const AdminLeaveManagementPage: React.FC<AdminLeaveManagementPageProps> = ({
                             <div className="bg-blue-50 border border-blue-100 rounded-md p-3 flex justify-between">
                                 <div className="text-blue-800 font-medium font-bold">Available {selectedRequest.leaveType} Balance:</div>
                                 <div className="font-bold text-blue-900">{selectedBalance.remaining} / {selectedBalance.total} Days</div>
+                            </div>
+                        )}
+
+                        {((selectedRequest as any).supportingDoc || (selectedRequest as any).document || (selectedRequest as any).supportingDocument) && (
+                            <div className="bg-indigo-50 border border-indigo-100 rounded-md p-3 flex items-center justify-between">
+                                <span className="text-xs font-bold text-indigo-800 uppercase">Supporting / Medical Document</span>
+                                <SecureDocumentLink
+                                    path={typeof ((selectedRequest as any).supportingDoc || (selectedRequest as any).document) === 'string'
+                                        ? ((selectedRequest as any).supportingDoc || (selectedRequest as any).document)
+                                        : ((selectedRequest as any).document?.url || (selectedRequest as any).supportingDocument)}
+                                    className="text-sm font-semibold text-indigo-600 hover:text-indigo-800 underline"
+                                >
+                                    View Attached Document
+                                </SecureDocumentLink>
                             </div>
                         )}
 

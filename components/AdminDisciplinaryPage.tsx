@@ -9,6 +9,7 @@ import Input from './common/Input';
 import { Gavel, AlertTriangle, Info, Plus, Search, Shield, Trash2, Loader2 } from 'lucide-react';
 import { getApplicantName } from '../utils/formDataHelper';
 import { getEmployeeLookupMap } from '../src/services/employeeService';
+import SecureDocumentLink from '../src/components/common/SecureDocumentLink';
 
 interface AdminDisciplinaryPageProps {
   disciplinaryActions: DisciplinaryAction[];
@@ -184,8 +185,16 @@ const AdminDisciplinaryPage: React.FC<AdminDisciplinaryPageProps> = ({
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                   {new Date(action.date).toLocaleDateString()}
                 </td>
-                <td className="px-6 py-4 text-sm text-gray-600 max-w-xs truncate" title={action.description}>
-                  {action.description}
+                <td className="px-6 py-4 text-sm text-gray-600 max-w-xs" title={action.description}>
+                  <div className="truncate">{action.description}</div>
+                  {(action.documentUrl || (action as any).document) && (
+                    <SecureDocumentLink
+                      path={action.documentUrl || (action as any).document}
+                      className="text-xs font-semibold text-blue-600 hover:underline mt-1 inline-block"
+                    >
+                      View Attached Proof
+                    </SecureDocumentLink>
+                  )}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-gray-500">
                   {action.filedBy}

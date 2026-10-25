@@ -73,9 +73,9 @@ const EmployeeDisciplinaryPage: React.FC<EmployeeDisciplinaryPageProps> = ({ dis
                                         <p className={`text-sm ${styles.text === 'text-white' ? 'text-gray-300' : 'text-gray-700'} leading-relaxed`}>
                                             {action.description}
                                         </p>
-                                        {action.documentUrl && (
+                                        {(action.documentUrl || (action as any).document) && (
                                             <SecureDocumentLink
-                                                path={action.documentUrl}
+                                                path={action.documentUrl || (action as any).document}
                                                 className="mt-3 inline-flex items-center text-sm font-medium text-blue-600 hover:text-blue-800 underline"
                                             >
                                                 <Info size={16} className="mr-1" /> View Warning Letter / Proof

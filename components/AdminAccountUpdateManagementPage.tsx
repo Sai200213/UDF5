@@ -8,6 +8,7 @@ import { CheckCircle, XCircle, Eye, History, FileText, Zap, Shield, RotateCcw, T
 import { getEmployeeLookupMap } from '../src/services/employeeService';
 import { getEffectiveApprovalLevel, isRoleAssignedToSite } from '../src/utils/workflowHelper';
 import { useData } from '../src/contexts/DataContext';
+import SecureDocumentLink from '../src/components/common/SecureDocumentLink';
 
 interface AdminAccountUpdateManagementPageProps {
   accountUpdateRequests: AccountUpdateRequest[];
@@ -142,9 +143,35 @@ const AdminAccountUpdateManagementPage: React.FC<AdminAccountUpdateManagementPag
             <div className="grid grid-cols-2 gap-4">
               <div><p className="text-xs text-gray-400 uppercase font-bold">Employee</p><p>{selectedRequest.employeeName}</p></div>
               <div><p className="text-xs text-gray-400 uppercase font-bold">Update Field</p><p>{selectedRequest.fieldLabel}</p></div>
-              <div><p className="text-xs text-gray-400 uppercase font-bold">Current</p><p className="text-gray-500">{String(selectedRequest.currentValue || 'None')}</p></div>
-              <div><p className="text-xs text-blue-600 uppercase font-bold">Requested</p><p className="font-bold text-blue-700">{String(selectedRequest.requestedValue)}</p></div>
+              <div>
+                <p className="text-xs text-gray-400 uppercase font-bold">Current</p>
+                {typeof selectedRequest.currentValue === 'string' && (selectedRequest.currentValue.startsWith('employees/') || selectedRequest.currentValue.startsWith('onboarding/') || selectedRequest.currentValue.startsWith('http')) ? (
+                  <SecureDocumentLink path={selectedRequest.currentValue} className="text-sm text-gray-600 underline">View Current File</SecureDocumentLink>
+                ) : (
+                  <p className="text-gray-500">{String(selectedRequest.currentValue || 'None')}</p>
+                )}
+              </div>
+              <div>
+                <p className="text-xs text-blue-600 uppercase font-bold">Requested</p>
+                {typeof selectedRequest.requestedValue === 'string' && (selectedRequest.requestedValue.startsWith('employees/') || selectedRequest.requestedValue.startsWith('onboarding/') || selectedRequest.requestedValue.startsWith('http')) ? (
+                  <SecureDocumentLink path={selectedRequest.requestedValue} className="text-sm font-bold text-blue-700 underline">View New Uploaded File</SecureDocumentLink>
+                ) : (
+                  <p className="font-bold text-blue-700">{String(selectedRequest.requestedValue)}</p>
+                )}
+              </div>
             </div>
+
+            {(selectedRequest.supportingDocument || (selectedRequest as any).document) && (
+              <div className="p-3 bg-blue-50 border border-blue-100 rounded-md flex items-center justify-between">
+                <span className="text-xs font-bold text-blue-800 uppercase">Supporting Proof Document</span>
+                <SecureDocumentLink
+                  path={selectedRequest.supportingDocument || (selectedRequest as any).document}
+                  className="text-sm font-semibold text-blue-600 hover:text-blue-800 underline"
+                >
+                  View Attached Proof
+                </SecureDocumentLink>
+              </div>
+            )}
 
             {(isSuperAdmin || hasPermission(Permission.ACCOUNT_UPDATES_DELETE)) && (
               <div className="flex justify-end border-b border-gray-100 pb-4">
