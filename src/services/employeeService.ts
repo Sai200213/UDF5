@@ -4826,6 +4826,24 @@ export const getCorrectionRequest = async (requestId: string): Promise<Correctio
     return null;
 };
 
+export const getCorrectionChallengeClient = async (token: string) => {
+    const fn = httpsCallable(functions, 'getCorrectionChallenge');
+    const res = await fn({ token });
+    return res.data as any;
+};
+
+export const verifyCorrectionIdentityClient = async (token: string, dob?: string, phone?: string) => {
+    const fn = httpsCallable(functions, 'verifyCorrectionIdentity');
+    const res = await fn({ token, dob, phone });
+    return res.data as any;
+};
+
+export const submitCorrectionServerClient = async (token: string, sessionToken: string, updatedFields: Record<string, any>) => {
+    const fn = httpsCallable(functions, 'submitCorrectionServer');
+    const res = await fn({ token, sessionToken, updatedFields });
+    return res.data as any;
+};
+
 export const submitCorrectionResponse = async (
     requestId: string,
     updatedData: Record<string, any>,

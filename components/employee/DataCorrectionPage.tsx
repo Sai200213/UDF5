@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { FormSection, FormField, FieldType, CorrectionRequest } from '../../types';
-import { getCorrectionRequest, submitCorrectionResponse } from '../../src/services/employeeService';
+import { getCorrectionRequest, submitCorrectionResponse, getCorrectionChallengeClient, verifyCorrectionIdentityClient, submitCorrectionServerClient } from '../../src/services/employeeService';
 import { getApplicantEmail, getApplicantName } from '../../utils/formDataHelper';
 import { useData } from '../../src/contexts/DataContext';
 import { useAuth } from '../../src/context/AuthContext';
@@ -68,6 +68,13 @@ const DataCorrectionPage: React.FC<DataCorrectionPageProps> = ({ sections }) => 
 
   // Guest Verification States (For manual pending applicants who don't have accounts)
   const [guestVerified, setGuestVerified] = useState(false);
+  const [sessionToken, setSessionToken] = useState<string | null>(() => {
+    try {
+      return token ? sessionStorage.getItem(`corr_session_${token}`) : null;
+    } catch {
+      return null;
+    }
+  });
   const [verificationEmail, setVerificationEmail] = useState('');
   const [verificationDob, setVerificationDob] = useState('');
   const [verificationPhone, setVerificationPhone] = useState('');
@@ -315,6 +322,28 @@ const DataCorrectionPage: React.FC<DataCorrectionPageProps> = ({ sections }) => 
     setVerifyingGuest(true);
 
     try {
+      // First attempt secure server-side verification with rate limiting
+      try {
+        const serverVerify = await verifyCorrectionIdentityClient(token, verificationDob, verificationPhone);
+        if (serverVerify && serverVerify.success) {
+          if (serverVerify.sessionToken) {
+            setSessionToken(serverVerify.sessionToken);
+            try { sessionStorage.setItem(`corr_session_${token}`, serverVerify.sessionToken); } catch {}
+          }
+          await ensureAuthenticated();
+          setGuestVerified(true);
+          setVerifyingGuest(false);
+          return;
+        }
+      } catch (srvErr: any) {
+        if (srvErr.code === 'permission-denied' || srvErr.code === 'unauthenticated' || srvErr.code === 'failed-precondition') {
+          setVerificationError(srvErr.message || "Verification details do not match.");
+          setVerifyingGuest(false);
+          return;
+        }
+        console.warn("Server verification fallback to local check:", srvErr);
+      }
+
       const submissionData = targetData || {};
       const rawForm = submissionData.formData || submissionData.data || {};
       const candidateSections = submissionData.originalFormSections || [];
@@ -768,12 +797,16 @@ const DataCorrectionPage: React.FC<DataCorrectionPageProps> = ({ sections }) => 
     setSubmitProgress({});
 
     try {
-      await submitCorrectionResponse(token, formData, (fieldId, status, percent) => {
-        setSubmitProgress(prev => ({
-          ...prev,
-          [fieldId]: { status, percent }
-        }));
-      });
+      if (sessionToken) {
+        await submitCorrectionServerClient(token, sessionToken, formData);
+      } else {
+        await submitCorrectionResponse(token, formData, (fieldId, status, percent) => {
+          setSubmitProgress(prev => ({
+            ...prev,
+            [fieldId]: { status, percent }
+          }));
+        });
+      }
 
       setSuccess(true);
     } catch (err: any) {

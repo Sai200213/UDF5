@@ -482,14 +482,7 @@ service cloud.firestore {
       // Correction token holders need GET to load the form (token acts as credentials)
       allow get: if true;
       allow list: if isAdmin() || hasPermission('SUBMISSIONS_APPROVE');
-      allow create, delete: if isAdmin() || hasPermission('SUBMISSIONS_APPROVE') || isSuperAdmin();
-      // Admins can update freely; clients can only mark a pending token as completed, increment failedAttempts, or lock on failed attempts
-      allow update: if isAdmin() || hasPermission('SUBMISSIONS_APPROVE') || isSuperAdmin()
-        || (resource.data.status == 'pending' && (
-            (request.resource.data.status == 'completed' && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'completedAt'])) ||
-            (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['failedAttempts'])) ||
-            (request.resource.data.status == 'locked' && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'failedAttempts']))
-        ));
+      allow create, update, delete: if isAdmin() || hasPermission('SUBMISSIONS_APPROVE') || isSuperAdmin();
     }
 
     // ─── Referral Invites ───────────────────────────────────────────────────

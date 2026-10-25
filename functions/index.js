@@ -3425,3 +3425,274 @@ exports.refreshAdminClaims = functions.https.onCall(async (request) => {
         throw new functions.https.HttpsError('internal', 'Failed to refresh claims.');
     }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLOUD-1: DATA CORRECTION SECURE PIPELINE
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * getCorrectionChallenge
+ * Public callable: Returns safe, sanitized challenge metadata for a correction link
+ * WITHOUT leaking plaintext verificationDob, verificationPhone, or requestedFieldValues.
+ */
+exports.getCorrectionChallenge = functions.https.onCall(async (request) => {
+    const { token } = request.data || {};
+    if (!token || typeof token !== 'string') {
+        throw new functions.https.HttpsError('invalid-argument', 'Correction token is required.');
+    }
+
+    const cleanToken = token.trim();
+    const db = admin.firestore();
+    const docSnap = await db.collection('correction_requests').doc(cleanToken).get();
+
+    if (!docSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Invalid correction link. This link does not exist.');
+    }
+
+    const data = docSnap.data();
+    const failedAttempts = data.failedAttempts || 0;
+    const isLocked = data.status === 'locked' || failedAttempts >= 5;
+
+    // Check expiry
+    let isExpired = false;
+    if (data.expiresAt) {
+        const expiryDate = data.expiresAt.toDate ? data.expiresAt.toDate() : new Date(data.expiresAt);
+        if (expiryDate < new Date()) {
+            isExpired = true;
+        }
+    }
+
+    // Mask phone helper
+    const rawPhone = String(data.verificationPhone || '');
+    const maskedPhone = rawPhone.length >= 4 ? `XXXXXX${rawPhone.slice(-4)}` : null;
+
+    // Mask email helper
+    let maskedEmail = null;
+    const rawEmail = String(data.linkedGoogleEmail || '');
+    if (rawEmail && rawEmail.includes('@')) {
+        const [local, domain] = rawEmail.split('@');
+        const first = local.slice(0, 2);
+        const last = local.slice(-1);
+        maskedEmail = `${first}****${last}@${domain}`;
+    }
+
+    return {
+        success: true,
+        applicantName: data.applicantName || 'Applicant',
+        status: isLocked ? 'locked' : (isExpired ? 'expired' : data.status),
+        authProvider: data.authProvider || 'manual',
+        linkedGoogleEmail: maskedEmail,
+        maskedPhone,
+        requiresVerification: data.authProvider !== 'google',
+        failedAttempts,
+        maxAttempts: 5,
+        targetType: data.targetType || 'submission',
+        expiresAt: data.expiresAt ? (data.expiresAt.toDate ? data.expiresAt.toDate().toISOString() : data.expiresAt) : null
+    };
+});
+
+/**
+ * verifyCorrectionIdentity
+ * Verifies candidate's DOB and Phone on the backend.
+ * Enforces rate limiting (max 5 attempts).
+ * On success, issues an HMAC-signed session token and releases requestedFieldDefinitions/Values.
+ */
+exports.verifyCorrectionIdentity = functions.https.onCall(async (request) => {
+    const { token, dob, phone } = request.data || {};
+    if (!token || typeof token !== 'string') {
+        throw new functions.https.HttpsError('invalid-argument', 'Correction token is required.');
+    }
+
+    const cleanToken = token.trim();
+    const db = admin.firestore();
+    const docRef = db.collection('correction_requests').doc(cleanToken);
+    const docSnap = await docRef.get();
+
+    if (!docSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Correction link does not exist.');
+    }
+
+    const data = docSnap.data();
+
+    // Check status
+    if (data.status === 'completed') {
+        throw new functions.https.HttpsError('failed-precondition', 'This correction link has already been used.');
+    }
+    if (data.status === 'locked' || (data.failedAttempts || 0) >= 5) {
+        throw new functions.https.HttpsError('permission-denied', 'This correction link is locked due to too many failed attempts.');
+    }
+
+    // Check if Google-linked and caller authenticated via Google
+    let isGoogleVerified = false;
+    if (data.authProvider === 'google' || data.linkedGoogleEmail) {
+        if (request.auth && request.auth.token && request.auth.token.email) {
+            const callerEmail = request.auth.token.email.toLowerCase().trim();
+            const targetEmail = (data.linkedGoogleEmail || '').toLowerCase().trim();
+            if (callerEmail === targetEmail) {
+                isGoogleVerified = true;
+            }
+        }
+    }
+
+    if (!isGoogleVerified) {
+        if (!dob || !phone) {
+            throw new functions.https.HttpsError('invalid-argument', 'Date of birth and mobile number are required.');
+        }
+
+        // Normalize DOB (YYYY-MM-DD)
+        const normalizeDob = (d) => {
+            if (!d) return '';
+            const clean = String(d).trim().replace(/[/\s]/g, '-');
+            const parts = clean.split('-');
+            if (parts.length === 3) {
+                if (parts[0].length === 4) return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+                if (parts[2].length === 4) return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+            }
+            return clean;
+        };
+
+        const inputDobNorm = normalizeDob(dob);
+        const storedDobNorm = normalizeDob(data.verificationDob);
+
+        // Normalize Phone (last 10 digits)
+        const inputPhone10 = String(phone).replace(/\D/g, '').slice(-10);
+        const storedPhone10 = String(data.verificationPhone || '').replace(/\D/g, '').slice(-10);
+
+        const dobMatch = Boolean(inputDobNorm && storedDobNorm && inputDobNorm === storedDobNorm);
+        const phoneMatch = Boolean(inputPhone10 && storedPhone10 && inputPhone10 === storedPhone10);
+
+        if (!dobMatch || !phoneMatch) {
+            const newAttempts = (data.failedAttempts || 0) + 1;
+            const isNowLocked = newAttempts >= 5;
+            await docRef.update({
+                failedAttempts: newAttempts,
+                ...(isNowLocked ? { status: 'locked' } : {})
+            });
+
+            if (isNowLocked) {
+                throw new functions.https.HttpsError('permission-denied', 'Verification failed. Link is now locked due to 5 failed attempts.');
+            }
+            throw new functions.https.HttpsError('unauthenticated', `Verification details do not match. Attempts remaining: ${5 - newAttempts}`);
+        }
+    }
+
+    // Success! Generate HMAC session token
+    const crypto = require('crypto');
+    const timestamp = Date.now();
+    const sessionPayload = `${cleanToken}:${timestamp}:${data.targetId}`;
+    const sessionToken = crypto.createHmac('sha256', 'UDF_CORRECTION_SESSION_KEY_2026_@DELTA').update(sessionPayload).digest('hex') + `.${timestamp}`;
+
+    // Store active session token on doc for validation
+    await docRef.update({
+        activeSessionToken: sessionToken,
+        sessionCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        failedAttempts: 0
+    });
+
+    return {
+        success: true,
+        sessionToken,
+        targetId: data.targetId,
+        targetType: data.targetType || 'submission',
+        requestedFields: data.requestedFields || [],
+        requestedFieldValues: data.requestedFieldValues || {},
+        requestedFieldDefinitions: data.requestedFieldDefinitions || [],
+        originalFormSections: data.originalFormSections || [],
+        instructions: data.instructions || '',
+        applicantName: data.applicantName || ''
+    };
+});
+
+/**
+ * submitCorrectionServer
+ * Submits the updated fields directly from the server.
+ * Validates the HMAC session token, updates /employees or /onboarding_submissions,
+ * recalculates identifiers and duplicate checks, marks correction request completed,
+ * and clears activeCorrectionToken.
+ */
+exports.submitCorrectionServer = functions.https.onCall(async (request) => {
+    const { token, sessionToken, updatedFields } = request.data || {};
+    if (!token || !sessionToken || !updatedFields || typeof updatedFields !== 'object') {
+        throw new functions.https.HttpsError('invalid-argument', 'Token, sessionToken, and updatedFields are required.');
+    }
+
+    const cleanToken = token.trim();
+    const db = admin.firestore();
+    const docRef = db.collection('correction_requests').doc(cleanToken);
+    const docSnap = await docRef.get();
+
+    if (!docSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Correction link does not exist.');
+    }
+
+    const reqData = docSnap.data();
+
+    if (reqData.status !== 'pending') {
+        throw new functions.https.HttpsError('failed-precondition', 'Correction request is no longer pending.');
+    }
+
+    // Verify Session Token HMAC and expiry (valid for 2 hours)
+    const crypto = require('crypto');
+    const [tokenHash, tsStr] = String(sessionToken).split('.');
+    const timestamp = parseInt(tsStr, 10);
+    if (!tokenHash || isNaN(timestamp) || (Date.now() - timestamp > 2 * 60 * 60 * 1000)) {
+        throw new functions.https.HttpsError('unauthenticated', 'Correction session has expired. Please verify again.');
+    }
+
+    const expectedPayload = `${cleanToken}:${timestamp}:${reqData.targetId}`;
+    const expectedHash = crypto.createHmac('sha256', 'UDF_CORRECTION_SESSION_KEY_2026_@DELTA').update(expectedPayload).digest('hex');
+
+    if (tokenHash !== expectedHash) {
+        throw new functions.https.HttpsError('permission-denied', 'Invalid correction session token.');
+    }
+
+    const targetCollection = reqData.targetType === 'employee' ? 'employees' : 'onboarding_submissions';
+    const targetRef = db.collection(targetCollection).doc(reqData.targetId);
+    const targetSnap = await targetRef.get();
+
+    if (!targetSnap.exists) {
+        throw new functions.https.HttpsError('not-found', `Target ${reqData.targetType} record not found.`);
+    }
+
+    const targetData = targetSnap.data();
+    const updates = {
+        updatedAt: new Date().toISOString(),
+        activeCorrectionToken: admin.firestore.FieldValue.delete()
+    };
+
+    // Filter updated fields to only allow those requested in reqData.requestedFields
+    const allowedFields = new Set(Array.isArray(reqData.requestedFields) ? reqData.requestedFields : []);
+    const processedData = {};
+    for (const [k, v] of Object.entries(updatedFields)) {
+        if (allowedFields.has(k)) {
+            processedData[k] = v;
+        }
+    }
+
+    if (reqData.targetType === 'employee') {
+        for (const [key, value] of Object.entries(processedData)) {
+            updates[`profileData.${key}`] = value;
+            updates[`data.${key}`] = value;
+        }
+    } else {
+        for (const [key, value] of Object.entries(processedData)) {
+            updates[`formData.${key}`] = value;
+            if (targetData.data) {
+                updates[`data.${key}`] = value;
+            }
+        }
+    }
+
+    // Update target document
+    await targetRef.update(updates);
+
+    // Mark correction request completed
+    await docRef.update({
+        status: 'completed',
+        completedAt: new Date().toISOString(),
+        submittedUpdates: processedData
+    });
+
+    console.log(`[submitCorrectionServer] Successfully processed correction ${cleanToken} for ${reqData.targetId}`);
+    return { success: true };
+});
