@@ -374,14 +374,10 @@ service cloud.firestore {
       ));
     }
 
-    // ─── Audit Logs ───────────────────────────────────────────────────────────
+    // ─── Audit Logs (Immutable Ledger - Server-Enforced) ─────────────────────
     match /audit_logs/{id} {
       allow read: if hasPermission('VIEW_AUDIT_LOGS') || (isAuthenticated() && resource.data.actorId == request.auth.uid);
-      allow create: if isRegisteredUser() && (
-        isAdmin() || request.resource.data.actorId == request.auth.uid
-      );
-      allow update: if false;
-      allow delete: if isSuperAdmin();
+      allow create, update, delete: if false;
     }
 
     // ─── Roles ───────────────────────────────────────────────────────────────
@@ -535,6 +531,12 @@ service cloud.firestore {
     match /safety_quizzes/{id} {
       allow read: if true;
       allow write: if isSuperAdmin() || hasPermission('GAMIFICATION_MANAGE');
+    }
+
+    // ─── Gamification Logs (Immutable Ledger - Server-Enforced) ──────────────
+    match /gamification_logs/{id} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create, update, delete: if false;
     }
   }
 }

@@ -5166,3 +5166,136 @@ exports.rejoinEmployeeServer = functions.https.onCall(async (request) => {
         rejoinDate
     };
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLOUD-6: IMMUTABLE AUDIT TRAIL & SECURE GAMIFICATION ENGINE
+// ─────────────────────────────────────────────────────────────────────────────
+
+exports.logClientAuditEvent = functions.https.onCall(async (request) => {
+    if (!request.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Must be authenticated to log audit events.');
+    }
+
+    const { action, module, details, targetId } = request.data || {};
+    if (!action || !module || !details) {
+        throw new functions.https.HttpsError('invalid-argument', 'Missing action, module, or details.');
+    }
+
+    const uid = request.auth.uid;
+    const token = request.auth.token || {};
+    const actorName = token.name || token.email || 'Staff';
+    const actorRole = token.roleId || 'Staff';
+
+    // Extract client IP and user agent
+    const rawReq = request.rawRequest || {};
+    const ip = rawReq.ip || (rawReq.headers && rawReq.headers['x-forwarded-for']) || 'unknown';
+    const userAgent = (rawReq.headers && rawReq.headers['user-agent']) || 'unknown';
+
+    const db = admin.firestore();
+    const docRef = db.collection('audit_logs').doc();
+
+    const entry = {
+        action: String(action).toUpperCase(),
+        actionType: String(action).toUpperCase(),
+        targetModule: String(module).toUpperCase(),
+        details: String(details),
+        targetId: targetId ? String(targetId) : null,
+        actorId: uid,
+        actorName,
+        actorRole,
+        clientIp: String(ip).split(',')[0].trim(),
+        userAgent: String(userAgent).substring(0, 200),
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    await docRef.set(entry);
+
+    return { success: true, logId: docRef.id };
+});
+
+exports.completeTrainingQuizServer = functions.https.onCall(async (request) => {
+    if (!request.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Must be authenticated to submit quiz answers.');
+    }
+
+    const uid = request.auth.uid;
+    const { questionId, selectedAnswer, quizDate } = request.data || {};
+
+    if (!selectedAnswer) {
+        throw new functions.https.HttpsError('invalid-argument', 'selectedAnswer is required.');
+    }
+
+    const db = admin.firestore();
+    const today = quizDate || new Date().toISOString().split('T')[0];
+
+    // 1. Rate-limit / Duplicate check: Has this user already completed today's quiz?
+    const existingLogSnap = await db.collection('gamification_logs')
+        .where('userId', '==', uid)
+        .where('type', '==', 'QUIZ')
+        .where('date', '==', today)
+        .limit(1)
+        .get();
+
+    if (!existingLogSnap.empty) {
+        throw new functions.https.HttpsError('already-exists', 'You have already completed the daily quiz today.');
+    }
+
+    // 2. Fetch gamification rules from settings/gamification_rules
+    const rulesSnap = await db.collection('settings').doc('gamification_rules').get();
+    const rulesData = rulesSnap.exists ? rulesSnap.data() : {};
+    const quizPoints = rulesData.quizPoints ?? 5;
+
+    // 3. Verify answer if question defined
+    let correctAnswer = null;
+    if (questionId) {
+        const quizDoc = await db.collection('safety_quizzes').doc(questionId).get();
+        if (quizDoc.exists) {
+            correctAnswer = quizDoc.data().correctAnswer;
+        }
+    }
+    if (!correctAnswer && rulesData.dailyQuiz && rulesData.dailyQuiz.correctAnswer) {
+        correctAnswer = rulesData.dailyQuiz.correctAnswer;
+    }
+
+    const isCorrect = correctAnswer ? (selectedAnswer === correctAnswer) : true;
+
+    if (!isCorrect) {
+        return {
+            success: true,
+            isCorrect: false,
+            pointsEarned: 0,
+            message: 'Incorrect answer. Better luck tomorrow!'
+        };
+    }
+
+    // 4. Atomically update user_engagement points and write to gamification_logs
+    const engagementRef = db.collection('user_engagement').doc(uid);
+    const logRef = db.collection('gamification_logs').doc();
+
+    const batch = db.batch();
+
+    batch.set(engagementRef, {
+        points: admin.firestore.FieldValue.increment(quizPoints),
+        lastQuizDate: today,
+        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    batch.set(logRef, {
+        userId: uid,
+        type: 'QUIZ',
+        questionId: questionId || 'daily_safety_quiz',
+        selectedAnswer,
+        pointsAwarded: quizPoints,
+        date: today,
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    await batch.commit();
+
+    console.log(`[completeTrainingQuizServer] Awarded ${quizPoints} pts to ${uid} for quiz on ${today}`);
+    return {
+        success: true,
+        isCorrect: true,
+        pointsEarned: quizPoints
+    };
+});

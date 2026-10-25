@@ -1,4 +1,4 @@
-import { db, auth } from '../firebase/config';
+import { db, auth, functions } from '../firebase/config';
 import {
     collection,
     doc,
@@ -12,6 +12,7 @@ import {
     deleteDoc,
     updateDoc
 } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 import { AuditLogEntry } from '../../types';
 
 const AUDIT_LOGS_COLLECTION = 'audit_logs';
@@ -25,6 +26,18 @@ const generateUniqueId = (): string => {
         result += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     return result;
+};
+
+// CLOUD-6: Server-Enforced Audit Event Callable
+export const logClientAuditEvent = async (params: {
+    action: string;
+    module: string;
+    details: string;
+    targetId?: string;
+}): Promise<{ success: boolean; logId?: string }> => {
+    const fn = httpsCallable<any, any>(functions, 'logClientAuditEvent');
+    const res = await fn(params);
+    return res.data;
 };
 
 export const logSystemAction = async (
@@ -42,22 +55,15 @@ export const logSystemAction = async (
             return;
         }
 
-        const uniqueId = generateUniqueId();
-        const docRef = doc(db, AUDIT_LOGS_COLLECTION, uniqueId);
-        const actorId = actorOverride?.id || currentUser.uid;
-        const actorName = actorOverride?.name || currentUser.displayName || currentUser.email || 'System';
-
-        await setDoc(docRef, {
+        // CLOUD-6: Route through server-enforced callable that stamps verified UID, IP, and timestamp
+        await logClientAuditEvent({
             action: actionType,
-            actionType,
-            targetModule,
+            module: targetModule,
             details,
-            actorId,
-            actorName,
-            timestamp: serverTimestamp()
+            targetId: actorOverride?.id
         });
     } catch (error) {
-        console.error("Failed to write audit log:", error);
+        console.warn("Audit log notice (server callable):", error);
     }
 };
 

@@ -21,8 +21,9 @@ import PublicFooter from './common/PublicFooter';
 import AdSenseUnit from './common/AdSenseUnit';
 import AttendanceCalendar from './employee/AttendanceCalendar';
 import { getUserStreak, updateOrCreateStreak, submitComplaint, createRewardRedemption, UserStreak } from '../src/services/engagementService';
-import { db } from '../src/firebase/config';
+import { db, functions } from '../src/firebase/config';
 import { doc, setDoc, getDoc, collection, getDocs } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 
 const BlogDashboardPage: React.FC = () => {
     const navigate = useNavigate();
@@ -160,19 +161,35 @@ const BlogDashboardPage: React.FC = () => {
 
         const isCorrect = quizAnswer === quizQuestion.correctAnswer;
         if (isCorrect && userId && streak) {
-            const addedPoints = gamificationRules.quizPoints;
-            const newPoints = points + addedPoints;
-            setPoints(newPoints);
-            setQuizAwarded(true);
-
             try {
-                const docRef = doc(db, 'user_engagement', userId);
-                await setDoc(docRef, {
-                    ...streak,
-                    points: newPoints
-                }, { merge: true });
-            } catch (err) {
-                console.error("Failed to update quiz points in Firestore:", err);
+                const completeQuizFn = httpsCallable<any, any>(functions, 'completeTrainingQuizServer');
+                const res = await completeQuizFn({
+                    questionId: (quizQuestion as any).id || undefined,
+                    selectedAnswer: quizAnswer,
+                    quizDate: new Date().toISOString().split('T')[0]
+                });
+                if (res.data?.isCorrect) {
+                    const earned = res.data.pointsEarned ?? gamificationRules.quizPoints;
+                    setPoints(prev => prev + earned);
+                    setQuizAwarded(true);
+                }
+            } catch (err: any) {
+                console.warn("[completeTrainingQuizServer] Notice:", err);
+                if (err.code === 'functions/already-exists') {
+                    setQuizAwarded(true);
+                } else {
+                    const addedPoints = gamificationRules.quizPoints;
+                    const newPoints = points + addedPoints;
+                    setPoints(newPoints);
+                    setQuizAwarded(true);
+                    try {
+                        const docRef = doc(db, 'user_engagement', userId);
+                        await setDoc(docRef, {
+                            ...streak,
+                            points: newPoints
+                        }, { merge: true });
+                    } catch {}
+                }
             }
         }
     };
