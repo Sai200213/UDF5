@@ -276,21 +276,12 @@ service cloud.firestore {
           request.resource.data.get('currentLevel', 1) == 1
         )
       );
-      allow update: if (
+      // Status, level, and approval history mutations are locked to Cloud Function (processRequestReviewServer)
+      allow update: if isSuperAdmin() || (
         isRegisteredUser() &&
         resource.data.status == 'Pending' &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'currentLevel', 'approvedBy', 'rejectedBy'])
-      ) || (
-        isSuperAdmin()
-      ) || (
-        request.resource.data.status == 'Approved' && hasPermission('LEAVES_APPROVE')
-      ) || (
-        request.resource.data.status == 'Rejected' && (hasPermission('LEAVES_REJECT') || hasPermission('LEAVES_APPROVE'))
-      ) || (
-        (request.resource.data.currentLevel < resource.data.currentLevel || (resource.data.status != 'Pending' && request.resource.data.status == 'Pending')) && 
-        (hasPermission('LEAVES_REVERT_DECISION') || hasPermission('LEAVES_APPROVE'))
-      ) || (
-        hasPermission('LEAVES_APPROVE')
+        (resource.data.employeeId == request.auth.uid || resource.data.get('uid', '') == request.auth.uid || isOwnerOfPortalId(resource.data.employeeId)) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'currentLevel', 'approvedBy', 'rejectedBy', 'approvalHistory', 'adminComments'])
       );
       allow delete: if hasPermission('LEAVES_DELETE') || hasPermission('LEAVES_APPROVE') || isSuperAdmin();
     }
@@ -309,21 +300,12 @@ service cloud.firestore {
           request.resource.data.get('currentLevel', 1) == 1
         )
       );
-      allow update: if (
+      // Status, level, and approval history mutations are locked to Cloud Function (processRequestReviewServer)
+      allow update: if isSuperAdmin() || (
         isRegisteredUser() &&
         resource.data.status == 'Pending' &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'currentLevel', 'approvedBy', 'rejectedBy'])
-      ) || (
-        isSuperAdmin()
-      ) || (
-        request.resource.data.status == 'Approved' && hasPermission('ACCOUNT_UPDATES_APPROVE')
-      ) || (
-        request.resource.data.status == 'Rejected' && (hasPermission('ACCOUNT_UPDATES_REJECT') || hasPermission('ACCOUNT_UPDATES_APPROVE'))
-      ) || (
-        (request.resource.data.currentLevel < resource.data.currentLevel || (resource.data.status != 'Pending' && request.resource.data.status == 'Pending')) && 
-        (hasPermission('ACCOUNT_UPDATES_REVERT_DECISION') || hasPermission('ACCOUNT_UPDATES_APPROVE'))
-      ) || (
-        hasPermission('ACCOUNT_UPDATES_APPROVE')
+        (resource.data.employeeId == request.auth.uid || resource.data.get('uid', '') == request.auth.uid || isOwnerOfPortalId(resource.data.employeeId)) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'currentLevel', 'approvedBy', 'rejectedBy', 'approvalHistory', 'adminComments'])
       );
       allow delete: if hasPermission('ACCOUNT_UPDATES_DELETE') || hasPermission('ACCOUNT_UPDATES_APPROVE') || isSuperAdmin();
     }
@@ -342,21 +324,12 @@ service cloud.firestore {
           request.resource.data.get('currentLevel', 1) == 1
         )
       );
-      allow update: if (
+      // Status, level, and approval history mutations are locked to Cloud Function (processRequestReviewServer)
+      allow update: if isSuperAdmin() || (
         isRegisteredUser() &&
         resource.data.status == 'Pending' &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'currentLevel', 'approvedBy', 'rejectedBy'])
-      ) || (
-        isSuperAdmin()
-      ) || (
-        request.resource.data.status == 'Approved' && (hasPermission('RESIGNATIONS_APPROVE') || isSuperAdmin())
-      ) || (
-        request.resource.data.status == 'Rejected' && (hasPermission('RESIGNATIONS_REJECT') || hasPermission('RESIGNATIONS_APPROVE') || isSuperAdmin())
-      ) || (
-        (request.resource.data.currentLevel < resource.data.currentLevel || (resource.data.status != 'Pending' && request.resource.data.status == 'Pending')) && 
-        (hasPermission('RESIGNATIONS_REVERT_DECISION') || hasPermission('RESIGNATIONS_APPROVE') || isSuperAdmin())
-      ) || (
-        hasPermission('RESIGNATIONS_APPROVE') || isSuperAdmin()
+        (resource.data.employeeId == request.auth.uid || resource.data.get('uid', '') == request.auth.uid || isOwnerOfPortalId(resource.data.employeeId)) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'currentLevel', 'approvedBy', 'rejectedBy', 'approvalHistory', 'adminComments', 'isProcessed'])
       );
       allow delete: if hasPermission('RESIGNATIONS_DELETE') || hasPermission('RESIGNATIONS_APPROVE') || isSuperAdmin();
     }

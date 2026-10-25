@@ -4079,3 +4079,429 @@ exports.onSubmissionCreated = onDocumentCreated("onboarding_submissions/{submiss
         console.error(`[TRIGGER: onSubmissionCreated] Error processing ${submissionId}:`, err);
     }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLOUD-4: Multi-Level Approval Engine for Leave, Resignation & Account Updates
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function resolveEmployeeDocAdmin(db, empId) {
+    if (!empId) return null;
+    let snap = await db.collection('employees').doc(empId).get();
+    if (snap.exists) return snap;
+    const byEmpId = await db.collection('employees').where('employeeId', '==', empId).limit(1).get();
+    if (!byEmpId.empty) return byEmpId.docs[0];
+    const byPortalId = await db.collection('employees').where('portalId', '==', empId).limit(1).get();
+    if (!byPortalId.empty) return byPortalId.docs[0];
+    return null;
+}
+
+async function resolveSubmissionDocAdmin(db, empId, subDocId) {
+    if (subDocId) {
+        const snap = await db.collection('onboarding_submissions').doc(subDocId).get();
+        if (snap.exists) return snap;
+    }
+    if (!empId) return null;
+    const byEmpId = await db.collection('onboarding_submissions').where('employeeId', '==', empId).limit(1).get();
+    if (!byEmpId.empty) return byEmpId.docs[0];
+    const byId = await db.collection('onboarding_submissions').doc(empId).get();
+    if (byId.exists) return byId;
+    return null;
+}
+
+exports.processRequestReviewServer = functions.https.onCall(async (request) => {
+    if (!request.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'You must be logged in to review requests.');
+    }
+
+    const {
+        requestType,
+        requestId,
+        action,
+        comment,
+        isBypass,
+        updatedRelievingDate,
+        targetLevel
+    } = request.data || {};
+
+    const typeMap = {
+        'LEAVES': 'leave_requests',
+        'leave_requests': 'leave_requests',
+        'ACCOUNT_UPDATES': 'account_updates',
+        'account_updates': 'account_updates',
+        'RESIGNATIONS': 'resignations',
+        'resignations': 'resignations'
+    };
+    const collectionName = typeMap[requestType];
+    if (!collectionName) {
+        throw new functions.https.HttpsError('invalid-argument', `Invalid requestType: "${requestType}". Expected LEAVES, ACCOUNT_UPDATES, or RESIGNATIONS.`);
+    }
+
+    if (!requestId || typeof requestId !== 'string') {
+        throw new functions.https.HttpsError('invalid-argument', 'requestId is required.');
+    }
+
+    const normalizedAction = String(action || '').toUpperCase();
+    if (!['APPROVE', 'REJECT', 'REVERT'].includes(normalizedAction)) {
+        throw new functions.https.HttpsError('invalid-argument', `Invalid action: "${action}". Expected APPROVE, REJECT, or REVERT.`);
+    }
+
+    const db = admin.firestore();
+    const uid = request.auth.uid;
+    const token = request.auth.token || {};
+    const isSuperAdmin = token.isSuperAdmin === true || token.roleId === 'super-admin';
+
+    // 1. Resolve caller details, permissions, and sites
+    let callerName = token.name || '';
+    let callerRoleId = token.roleId || '';
+    let callerRoleName = 'Admin';
+    let permissions = Array.isArray(token.permissions) ? [...token.permissions] : [];
+    let sitesManaged = Array.isArray(token.sitesManaged) ? [...token.sitesManaged] : [];
+
+    if (!callerName || !callerRoleId || permissions.length === 0) {
+        const [saSnap, uSnap, stSnap] = await Promise.all([
+            db.collection('staff_accounts').doc(uid).get(),
+            db.collection('users').doc(uid).get(),
+            db.collection('staff').doc(uid).get()
+        ]);
+        const staffDoc = saSnap.exists ? saSnap.data() : (stSnap.exists ? stSnap.data() : (uSnap.exists ? uSnap.data() : null));
+        if (staffDoc) {
+            callerName = callerName || staffDoc.name || staffDoc.fullName || staffDoc.displayName || 'Admin';
+            callerRoleId = callerRoleId || staffDoc.roleId || 'admin';
+            if (Array.isArray(staffDoc.sitesManaged)) {
+                sitesManaged = Array.from(new Set([...sitesManaged, ...staffDoc.sitesManaged]));
+            }
+        }
+    }
+    if (!callerName) callerName = 'Admin';
+    if (callerRoleId) {
+        const roleSnap = await db.collection('roles').doc(callerRoleId).get();
+        if (roleSnap.exists) {
+            const rData = roleSnap.data();
+            callerRoleName = rData.name || callerRoleId;
+            if (Array.isArray(rData.permissions)) {
+                permissions = Array.from(new Set([...permissions, ...rData.permissions]));
+            }
+        }
+    }
+
+    // 2. Permission check
+    const moduleMap = {
+        'leave_requests': 'LEAVES',
+        'account_updates': 'ACCOUNT_UPDATES',
+        'resignations': 'RESIGNATIONS'
+    };
+    const modId = moduleMap[collectionName];
+
+    let hasPerm = isSuperAdmin;
+    if (!hasPerm) {
+        if (normalizedAction === 'APPROVE') {
+            hasPerm = permissions.includes(`${modId}_APPROVE`);
+        } else if (normalizedAction === 'REJECT') {
+            hasPerm = permissions.includes(`${modId}_REJECT`) || permissions.includes(`${modId}_APPROVE`);
+        } else if (normalizedAction === 'REVERT') {
+            hasPerm = permissions.includes(`${modId}_REVERT_DECISION`) || permissions.includes(`${modId}_APPROVE`);
+        }
+    }
+
+    if (!hasPerm) {
+        throw new functions.https.HttpsError('permission-denied', `Missing permission to ${normalizedAction.toLowerCase()} ${modId} requests.`);
+    }
+
+    // 3. Fetch request document
+    const reqRef = db.collection(collectionName).doc(requestId);
+    const reqSnap = await reqRef.get();
+    if (!reqSnap.exists) {
+        throw new functions.https.HttpsError('not-found', `${modId} request "${requestId}" not found.`);
+    }
+    const reqData = reqSnap.data();
+    const siteId = reqData.siteId || '';
+
+    // 4. Site authorization check
+    if (siteId && !isSuperAdmin) {
+        const hasGlobalScope = permissions.includes('EMPLOYEES_VIEW_SCOPE_ALL') ||
+            permissions.includes('SUBMISSIONS_VIEW_SCOPE_ALL') ||
+            permissions.includes('MANAGE_SITES') ||
+            permissions.includes('MANAGE_ALL_SITES') ||
+            permissions.includes(`${modId}_VIEW_SCOPE_ALL`);
+
+        let siteAuthorized = hasGlobalScope || sitesManaged.includes(siteId);
+
+        if (!siteAuthorized) {
+            const sitesSnap = await db.collection('settings').doc('sites').get();
+            if (sitesSnap.exists) {
+                const siteList = sitesSnap.data().sites || [];
+                const targetSite = siteList.find(s => s && s.id === siteId);
+                if (targetSite) {
+                    const supIds = Array.isArray(targetSite.supervisorIds) ? targetSite.supervisorIds : [targetSite.supervisorId].filter(Boolean);
+                    if (supIds.includes(uid)) {
+                        siteAuthorized = true;
+                    }
+                }
+            }
+        }
+
+        if (!siteAuthorized) {
+            throw new functions.https.HttpsError('permission-denied', `You do not have management authority for site "${siteId}".`);
+        }
+    }
+
+    // 5. Workflow level progression
+    const wfSnap = await db.collection('settings').doc('workflows').get();
+    const wfConfigs = wfSnap.exists ? (wfSnap.data().configs || []) : [];
+    const wfConfig = wfConfigs.find(c => c && c.moduleId === modId);
+    const levels = wfConfig && Array.isArray(wfConfig.levels) ? wfConfig.levels : [];
+    const maxLevels = levels.length > 0 ? Math.max(...levels.map(l => l.level)) : 1;
+    const currentLevel = Number(reqData.currentLevel) || 1;
+
+    let newStatus = reqData.status;
+    let newLevel = currentLevel;
+    let nextLevelRoleId = null;
+    let isProcessed = reqData.isProcessed;
+
+    const historyEntry = {
+        level: currentLevel,
+        actionBy: callerName,
+        actionByRole: callerRoleName,
+        timestamp: new Date().toISOString(),
+        status: normalizedAction === 'APPROVE' ? 'Approved' : (normalizedAction === 'REJECT' ? 'Rejected' : 'Reverted'),
+        comments: comment || (normalizedAction === 'REVERT' ? `Reverted to Level ${targetLevel || 1}` : '')
+    };
+
+    const sideEffects = [];
+
+    if (normalizedAction === 'REJECT') {
+        newStatus = 'Rejected';
+    } else if (normalizedAction === 'REVERT') {
+        newStatus = 'Pending';
+        newLevel = Number(targetLevel) || 1;
+
+        // If reverting an already approved leave request, refund the deducted days!
+        if (collectionName === 'leave_requests' && reqData.status === 'Approved') {
+            const [sY, sM, sD] = String(reqData.startDate || '').split('-').map(Number);
+            const [eY, eM, eD] = String(reqData.endDate || '').split('-').map(Number);
+            if (!isNaN(sY) && !isNaN(eY)) {
+                const daysTaken = Math.round((Date.UTC(eY, eM - 1, eD) - Date.UTC(sY, sM - 1, sD)) / (1000 * 3600 * 24)) + 1;
+                const keyMap = {
+                    'Casual Leave': 'casual',
+                    'Sick Leave': 'sick',
+                    'Earned Leave': 'earned',
+                    'Privilege Leave': 'privilege'
+                };
+                const balanceKey = keyMap[reqData.leaveType] || String(reqData.leaveType || '').toLowerCase();
+                sideEffects.push(async (batch) => {
+                    const empSnap = await resolveEmployeeDocAdmin(db, reqData.employeeId);
+                    if (empSnap && empSnap.exists) {
+                        batch.update(empSnap.ref, {
+                            [`leaveBalance.${balanceKey}`]: admin.firestore.FieldValue.increment(daysTaken)
+                        });
+                    }
+                });
+            }
+        }
+    } else if (normalizedAction === 'APPROVE') {
+        if (!isBypass && currentLevel < maxLevels) {
+            // Advance to next workflow level
+            newLevel = currentLevel + 1;
+            newStatus = 'Pending';
+            const nextLvlConfig = levels.find(l => l.level === newLevel);
+            if (nextLvlConfig) {
+                nextLevelRoleId = nextLvlConfig.roleId;
+            }
+        } else {
+            // Final Approval
+            newStatus = 'Approved';
+            newLevel = maxLevels;
+
+            if (collectionName === 'leave_requests') {
+                const [sY, sM, sD] = String(reqData.startDate || '').split('-').map(Number);
+                const [eY, eM, eD] = String(reqData.endDate || '').split('-').map(Number);
+                if (!isNaN(sY) && !isNaN(eY)) {
+                    const daysTaken = Math.round((Date.UTC(eY, eM - 1, eD) - Date.UTC(sY, sM - 1, sD)) / (1000 * 3600 * 24)) + 1;
+                    const keyMap = {
+                        'Casual Leave': 'casual',
+                        'Sick Leave': 'sick',
+                        'Earned Leave': 'earned',
+                        'Privilege Leave': 'privilege'
+                    };
+                    const balanceKey = keyMap[reqData.leaveType] || String(reqData.leaveType || '').toLowerCase();
+                    sideEffects.push(async (batch) => {
+                        const empSnap = await resolveEmployeeDocAdmin(db, reqData.employeeId);
+                        if (empSnap && empSnap.exists) {
+                            batch.update(empSnap.ref, {
+                                [`leaveBalance.${balanceKey}`]: admin.firestore.FieldValue.increment(-daysTaken)
+                            });
+                        }
+                    });
+                }
+            } else if (collectionName === 'account_updates') {
+                const fieldId = reqData.fieldId;
+                const requestedValue = reqData.requestedValue;
+                if (fieldId) {
+                    sideEffects.push(async (batch) => {
+                        const empSnap = await resolveEmployeeDocAdmin(db, reqData.employeeId);
+                        if (empSnap && empSnap.exists) {
+                            const empUpdates = {
+                                [`profileData.${fieldId}`]: requestedValue,
+                                [`data.${fieldId}`]: requestedValue,
+                                lastUpdated: new Date().toISOString()
+                            };
+                            const ed = empSnap.data();
+                            const fIdLower = fieldId.toLowerCase();
+                            if (/pan/i.test(fIdLower)) empUpdates.panNumber = requestedValue;
+                            if (/aadhaar|aadhar/i.test(fIdLower)) empUpdates.aadhaarNumber = requestedValue;
+                            if (/uan/i.test(fIdLower)) empUpdates.uanNumber = requestedValue;
+                            if (/phone|mobile/i.test(fIdLower)) empUpdates.phoneNumber = requestedValue;
+                            if (/name/i.test(fIdLower)) empUpdates.applicantName = requestedValue;
+
+                            batch.update(empSnap.ref, empUpdates);
+
+                            const subSnap = await resolveSubmissionDocAdmin(db, reqData.employeeId, empSnap.id);
+                            if (subSnap && subSnap.exists) {
+                                batch.update(subSnap.ref, {
+                                    [`formData.${fieldId}`]: requestedValue,
+                                    [`data.${fieldId}`]: requestedValue,
+                                    lastUpdated: new Date().toISOString()
+                                });
+                            }
+                        }
+                    });
+                }
+            } else if (collectionName === 'resignations') {
+                const effectiveRelDate = updatedRelievingDate || reqData.relievingDate;
+                const today = new Date();
+                today.setHours(23, 59, 59, 999);
+                const relDateObj = new Date(effectiveRelDate);
+                const isPastOrToday = !isNaN(relDateObj.getTime()) && relDateObj <= today;
+
+                sideEffects.push(async (batch) => {
+                    const empSnap = await resolveEmployeeDocAdmin(db, reqData.employeeId);
+                    if (empSnap && empSnap.exists) {
+                        if (isPastOrToday) {
+                            batch.update(empSnap.ref, {
+                                isActive: false,
+                                status: 'Relieved',
+                                isRelieved: true,
+                                relievingDate: effectiveRelDate,
+                                relievingReason: reqData.reason || 'Resignation'
+                            });
+                            isProcessed = true;
+                        } else {
+                            batch.update(empSnap.ref, {
+                                resignationStatus: 'Notice Period',
+                                pendingRelievingDate: effectiveRelDate,
+                                relievingDate: effectiveRelDate,
+                                relievingReason: reqData.reason || 'Resignation'
+                            });
+                            isProcessed = false;
+                        }
+
+                        const subSnap = await resolveSubmissionDocAdmin(db, reqData.employeeId, empSnap.id);
+                        if (subSnap && subSnap.exists) {
+                            if (isPastOrToday) {
+                                batch.update(subSnap.ref, {
+                                    isActive: false,
+                                    status: 'Relieved',
+                                    isRelieved: true,
+                                    relievingDate: effectiveRelDate,
+                                    relievingReason: reqData.reason || 'Resignation'
+                                });
+                            } else {
+                                batch.update(subSnap.ref, {
+                                    resignationStatus: 'Notice Period',
+                                    pendingRelievingDate: effectiveRelDate,
+                                    relievingDate: effectiveRelDate,
+                                    relievingReason: reqData.reason || 'Resignation'
+                                });
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    // 6. Execute atomic batch write
+    const batch = db.batch();
+
+    for (const effect of sideEffects) {
+        await effect(batch);
+    }
+
+    const reqUpdates = {
+        status: newStatus,
+        currentLevel: newLevel,
+        approvalHistory: [...(reqData.approvalHistory || []), historyEntry],
+        lastActionAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+    if (comment) reqUpdates.adminComments = comment;
+    if (updatedRelievingDate) reqUpdates.relievingDate = updatedRelievingDate;
+    if (typeof isProcessed === 'boolean') reqUpdates.isProcessed = isProcessed;
+
+    batch.update(reqRef, reqUpdates);
+
+    // Append-only Audit Log
+    const auditRef = db.collection('audit_logs').doc();
+    batch.set(auditRef, {
+        action: normalizedAction === 'APPROVE' ? 'APPROVAL' : (normalizedAction === 'REJECT' ? 'REJECTION' : 'STATUS_CHANGE'),
+        module: modId,
+        targetId: requestId,
+        actorId: uid,
+        actorName: callerName,
+        details: `${normalizedAction} on ${modId} request for ${reqData.employeeName || reqData.employeeId} (${requestId}) - Status: ${newStatus}, Level: ${newLevel}`,
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // In-App Notification to Employee
+    const notifRef = db.collection('notifications').doc();
+    let empMsg = `Your ${modId.replace('_', ' ')} request status is now ${newStatus}.`;
+    if (normalizedAction === 'APPROVE') {
+        empMsg = newStatus === 'Approved'
+            ? `Your ${reqData.leaveType || modId.replace('_', ' ')} request has been fully approved.`
+            : `Your ${reqData.leaveType || modId.replace('_', ' ')} request was approved at Level ${currentLevel} (now Level ${newLevel}).`;
+    } else if (normalizedAction === 'REJECT') {
+        empMsg = `Your ${reqData.leaveType || modId.replace('_', ' ')} request was rejected.`;
+    } else if (normalizedAction === 'REVERT') {
+        empMsg = `Your ${reqData.leaveType || modId.replace('_', ' ')} request was reverted to Level ${newLevel}.`;
+    }
+
+    const notifLinks = {
+        'leave_requests': '/employee/leave-requests',
+        'account_updates': '/employee/account-updates',
+        'resignations': '/employee/resignation'
+    };
+
+    batch.set(notifRef, {
+        targetUserId: reqData.employeeId,
+        message: empMsg,
+        type: newStatus === 'Approved' ? 'success' : (newStatus === 'Rejected' ? 'error' : 'info'),
+        link: notifLinks[collectionName] || null,
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        timestamp: new Date().toISOString()
+    });
+
+    // In-App Notification to next level approvers (if escalated)
+    if (nextLevelRoleId) {
+        const nextNotifRef = db.collection('notifications').doc();
+        batch.set(nextNotifRef, {
+            targetUserId: `ROLE:${nextLevelRoleId}`,
+            message: `Pending ${modId.replace('_', ' ')} Approval for ${reqData.employeeName || reqData.employeeId} (Level ${newLevel})`,
+            type: 'info',
+            link: `/admin/${modId.toLowerCase().replace('_', '-')}`,
+            read: false,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            timestamp: new Date().toISOString()
+        });
+    }
+
+    await batch.commit();
+
+    console.log(`[processRequestReviewServer] Successfully processed ${modId}/${requestId}: ${normalizedAction} -> Status: ${newStatus}, Level: ${newLevel}`);
+
+    return {
+        success: true,
+        requestId,
+        status: newStatus,
+        currentLevel: newLevel
+    };
+});

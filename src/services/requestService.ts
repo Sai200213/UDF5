@@ -1,6 +1,7 @@
 import log from "@/src/utils/logger";
-import { db } from '../firebase/config';
+import { db, functions } from '../firebase/config';
 import { collection, doc, onSnapshot, setDoc, query, where, getDocs } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 import { LeaveRequest, AccountUpdateRequest, ResignationRequest, DisciplinaryAction } from '../../types';
 import { uploadFile } from './storageService';
 import { logSystemAction } from './auditService';
@@ -228,18 +229,63 @@ export const addDisciplinaryAction = async (action: DisciplinaryAction) => {
     await logSystemAction('CREATE', 'DISCIPLINARY', `Filed ${action.actionType} for employee ${action.employeeName} (${action.employeeId}) by ${action.filedBy}`);
 };
 
+// --- CLOUD-4: Multi-Level Approval Engine (Server-Enforced) ---
+export interface ProcessRequestReviewParams {
+    requestType: 'LEAVES' | 'ACCOUNT_UPDATES' | 'RESIGNATIONS';
+    requestId: string;
+    action: 'APPROVE' | 'REJECT' | 'REVERT';
+    comment?: string;
+    isBypass?: boolean;
+    updatedRelievingDate?: string;
+    targetLevel?: number;
+}
+
+export interface ProcessRequestReviewResult {
+    success: boolean;
+    requestId: string;
+    status: string;
+    currentLevel: number;
+}
+
+export const processRequestReview = async (
+    params: ProcessRequestReviewParams
+): Promise<ProcessRequestReviewResult> => {
+    const fn = httpsCallable<ProcessRequestReviewParams, ProcessRequestReviewResult>(
+        functions,
+        'processRequestReviewServer'
+    );
+    const res = await fn(params);
+    return res.data;
+};
+
 // --- Universal Workflow Revert ---
 export const revertWorkflowRequest = async (
     collectionId: 'leave_requests' | 'account_updates' | 'resignations',
     id: string,
     targetLevel: number
 ) => {
-    const docRef = doc(db, collectionId, id);
-    await setDoc(docRef, {
-        status: 'Pending',
-        currentLevel: targetLevel
-    }, { merge: true });
-    await logSystemAction('STATUS_CHANGE', 'SYSTEM', `Reverted ${collectionId} request ${id} to approval level ${targetLevel}`);
+    const typeMap = {
+        'leave_requests': 'LEAVES',
+        'account_updates': 'ACCOUNT_UPDATES',
+        'resignations': 'RESIGNATIONS'
+    } as const;
+
+    try {
+        await processRequestReview({
+            requestType: typeMap[collectionId],
+            requestId: id,
+            action: 'REVERT',
+            targetLevel
+        });
+    } catch (err) {
+        log.warn(`[revertWorkflowRequest] Server callable failed, falling back to direct write:`, err);
+        const docRef = doc(db, collectionId, id);
+        await setDoc(docRef, {
+            status: 'Pending',
+            currentLevel: targetLevel
+        }, { merge: true });
+        await logSystemAction('STATUS_CHANGE', 'SYSTEM', `Reverted ${collectionId} request ${id} to approval level ${targetLevel}`);
+    }
 };
 
 
