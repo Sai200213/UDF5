@@ -2213,10 +2213,9 @@ export const updateSubmissionEmployeeId = async (submissionId: string, oldId: st
     await updateDoc(subRef, { employeeId: newId });
 
     // 3. Update Employee Document
-    const empRef = doc(db, EMPLOYEES_COLLECTION, submissionId);
-    const empSnap = await getDoc(empRef);
-    if (empSnap.exists()) {
-        await updateDoc(empRef, { employeeId: newId });
+    const resolvedEmp = (await resolveEmployeeDoc(submissionId)) || (oldId ? await resolveEmployeeDoc(oldId) : null);
+    if (resolvedEmp) {
+        await updateDoc(resolvedEmp.ref, { employeeId: newId });
     }
 };
 
@@ -2236,8 +2235,10 @@ export const revertSubmissionWorkflow = async (
 
     // Usually, revert means "back to review", so if it was finalized, we should probably delete the employee stub.
     if (data.status === 'Approved' && data.employeeId) {
-        const empId = data.employeeId;
-        await deleteDoc(doc(db, EMPLOYEES_COLLECTION, submissionId));
+        const resolvedEmp = (await resolveEmployeeDoc(submissionId)) || (data.employeeId ? await resolveEmployeeDoc(data.employeeId) : null);
+        if (resolvedEmp) {
+            await deleteDoc(resolvedEmp.ref);
+        }
 
         // Move files back in Storage and rename/restore in Drive (Asynchronous background)
         (async () => {
@@ -2309,10 +2310,9 @@ export const softDeleteSubmission = async (submissionId: string) => {
         await moveEmployeeFolderToRecycleBin(applicantName, currentUniqueId, folderName);
 
         // 2. If it's an approved employee, soft delete the employee record too
-        const empRef = doc(db, EMPLOYEES_COLLECTION, submissionId);
-        const empSnap = await getDoc(empRef);
-        if (empSnap.exists()) {
-            await updateDoc(empRef, {
+        const resolvedEmp = (await resolveEmployeeDoc(submissionId)) || (data.employeeId ? await resolveEmployeeDoc(data.employeeId) : null);
+        if (resolvedEmp) {
+            await updateDoc(resolvedEmp.ref, {
                 deletedAt: new Date().toISOString(),
                 isActive: false
             });
@@ -4535,7 +4535,8 @@ export const adminUpdateEmployeeEmail = async (employeeId: string, newEmail: str
     
     // Also update profile display email in Firestore
     try {
-        const empRef = doc(db, EMPLOYEES_COLLECTION, employeeId);
+        const resolvedEmp = await resolveEmployeeDoc(employeeId);
+        const empRef = resolvedEmp?.ref || doc(db, EMPLOYEES_COLLECTION, employeeId);
         await updateDoc(empRef, {
             email: newEmail,
             'profileData.personalDetails.email': newEmail,
