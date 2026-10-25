@@ -1526,6 +1526,76 @@ export const checkLinkedUidExists = async (uid: string, email: string | null): P
     }
 };
 
+// ============================================================================
+// CLOUD-5: ATOMIC EMPLOYEE LIFECYCLE STATE MACHINE (SERVER-ENFORCED)
+// ============================================================================
+
+export interface ApproveOnboardingServerParams {
+    submissionId: string;
+    assignedEmployeeId: string;
+    siteId?: string;
+    joiningDate?: string;
+    customRecruiter?: { id?: string; name?: string };
+    profileCompletionData?: {
+        profileCompletionStatus: 'COMPLETE' | 'INCOMPLETE';
+        pendingProfileFields: string[];
+        pendingProfileNote: string;
+    };
+    comments?: string;
+}
+
+export const approveOnboardingServerCall = async (
+    params: ApproveOnboardingServerParams
+): Promise<{ success: boolean; submissionId: string; employeeId: string }> => {
+    const fn = httpsCallable<ApproveOnboardingServerParams, { success: boolean; submissionId: string; employeeId: string }>(
+        functions,
+        'approveOnboardingServer'
+    );
+    const res = await fn(params);
+    return res.data;
+};
+
+export interface RelieveEmployeeServerParams {
+    employeeId: string;
+    relievingDate: string;
+    reason?: string;
+    remarks?: string;
+}
+
+export const relieveEmployeeServerCall = async (
+    params: RelieveEmployeeServerParams
+): Promise<{ success: boolean; employeeId: string; relievingDate: string }> => {
+    const fn = httpsCallable<RelieveEmployeeServerParams, { success: boolean; employeeId: string; relievingDate: string }>(
+        functions,
+        'relieveEmployeeServer'
+    );
+    const res = await fn(params);
+    return res.data;
+};
+
+export interface RejoinEmployeeServerParams {
+    employeeId: string;
+    newEmployeeId?: string;
+    rejoinDate: string;
+    siteId?: string;
+    siteName?: string;
+    subUnitId?: string;
+    subUnitName?: string;
+    designation?: string;
+    foldersToCopy?: string[];
+}
+
+export const rejoinEmployeeServerCall = async (
+    params: RejoinEmployeeServerParams
+): Promise<{ success: boolean; isNewRecord: boolean; employeeId?: string; newEmployeeId?: string; rejoinDate: string }> => {
+    const fn = httpsCallable<RejoinEmployeeServerParams, any>(
+        functions,
+        'rejoinEmployeeServer'
+    );
+    const res = await fn(params);
+    return res.data;
+};
+
 export const updateSubmissionStatus = async (
     submissionId: string,
     status: 'Pending Review' | 'Approved' | 'Rejected',
@@ -1928,7 +1998,51 @@ export const updateSubmissionStatus = async (
 
             // Atomically update submission alongside employee creation
             approvalBatch.update(submissionRef, updates);
-            await approvalBatch.commit();
+
+            // CLOUD-5: Run server-enforced atomic onboarding state machine
+            let serverApproved = false;
+            try {
+                await approveOnboardingServerCall({
+                    submissionId,
+                    assignedEmployeeId: empId,
+                    siteId: initialSiteId,
+                    joiningDate: resolvedJoiningDate,
+                    customRecruiter: (customRecruiter && customRecruiter.id) ? { id: customRecruiter.id, name: customRecruiter.name || 'Direct Apply' } : undefined,
+                    profileCompletionData: profileCompletionData ? {
+                        profileCompletionStatus: profileCompletionData.profileCompletionStatus,
+                        pendingProfileFields: profileCompletionData.pendingProfileFields || [],
+                        pendingProfileNote: profileCompletionData.pendingProfileNote || ''
+                    } : undefined,
+                    comments: adminComments
+                });
+                serverApproved = true;
+                log.log(`[approveOnboardingServerCall] Server state machine committed successfully for ${empId}`);
+            } catch (serverErr: any) {
+                console.warn("[approveOnboardingServerCall] Server call failed, evaluating error:", serverErr);
+                if (
+                    serverErr.code === 'functions/already-exists' ||
+                    serverErr.code === 'functions/permission-denied' ||
+                    serverErr.code === 'functions/failed-precondition' ||
+                    serverErr.message?.includes('already exists') ||
+                    serverErr.message?.includes('already taken')
+                ) {
+                    throw serverErr;
+                }
+                // Fallback to client batch write if server call had transient error
+                await approvalBatch.commit();
+            }
+
+            if (serverApproved && data.legacyImportId) {
+                try {
+                    let targetLegacyRef = doc(db, 'legacy_employee_imports', data.legacyImportId);
+                    await updateDoc(targetLegacyRef, { 
+                        status: 'Finalized',
+                        finalEmployeeId: empId,
+                        linkedUid: data.linkedUid || '',
+                        finalizedAt: new Date().toISOString()
+                    });
+                } catch {}
+            }
         } else {
             // Non-approval status updates
             await updateDoc(submissionRef, updates);
@@ -2478,29 +2592,42 @@ export const relieveEmployee = async (
         throw new Error(`Employee record with ID ${employeeId} was not found in the database.`);
     }
 
-    const batch = writeBatch(db);
-    batch.update(empRef, {
-        isActive: false,
-        status: 'Relieved',
-        isRelieved: true,
-        relievingDate: relievingDate,
-        relievingReason: relievingReason
-    });
+    // CLOUD-5: Server-enforced atomic relieving state machine
+    try {
+        await relieveEmployeeServerCall({
+            employeeId,
+            relievingDate,
+            reason: relievingReason
+        });
+        log.log(`[relieveEmployeeServerCall] Successfully relieved employee ${employeeId}`);
+    } catch (serverErr: any) {
+        console.warn("[relieveEmployeeServerCall] Cloud Function failed, running client fallback:", serverErr);
+        if (serverErr.code === 'functions/permission-denied') throw serverErr;
 
-    // Sync to Submission doc
-    const subQuery = query(collection(db, SUBMISSIONS_COLLECTION), where("employeeId", "==", employeeId));
-    const subSnap = await getDocs(subQuery);
-    if (!subSnap.empty) {
-        batch.update(subSnap.docs[0].ref, {
+        const batch = writeBatch(db);
+        batch.update(empRef, {
             isActive: false,
             status: 'Relieved',
             isRelieved: true,
             relievingDate: relievingDate,
             relievingReason: relievingReason
         });
-    }
 
-    await batch.commit();
+        // Sync to Submission doc
+        const subQuery = query(collection(db, SUBMISSIONS_COLLECTION), where("employeeId", "==", employeeId));
+        const subSnap = await getDocs(subQuery);
+        if (!subSnap.empty) {
+            batch.update(subSnap.docs[0].ref, {
+                isActive: false,
+                status: 'Relieved',
+                isRelieved: true,
+                relievingDate: relievingDate,
+                relievingReason: relievingReason
+            });
+        }
+
+        await batch.commit();
+    }
 
     const folderName = empData?.driveFolderName;
     const applicantName = empData?.applicantName ||
@@ -2584,6 +2711,53 @@ export const rejoinEmployee = async (
 
     if (!empData) throw new Error("Employee record not found");
 
+    const applicantName = empData.applicantName || 'Unknown';
+    const cleanNewId = (newEmployeeId && newEmployeeId.trim()) ? newEmployeeId.trim().toUpperCase() : undefined;
+    const newFolderName = cleanNewId ? `${cleanNewId} - ${applicantName}` : empData.driveFolderName;
+
+    // CLOUD-5: Server-enforced atomic rejoin state machine
+    try {
+        await rejoinEmployeeServerCall({
+            employeeId,
+            newEmployeeId: cleanNewId,
+            rejoinDate,
+            siteId,
+            siteName,
+            subUnitId,
+            subUnitName,
+            designation,
+            foldersToCopy
+        });
+        log.log(`[rejoinEmployeeServerCall] Successfully rejoined employee ${employeeId} via Cloud Function`);
+
+        // Drive folder handling
+        if (cleanNewId) {
+            (async () => {
+                try {
+                    await createEmployeeFolder(applicantName, cleanNewId);
+                    log.log(`Created Drive folder for ${cleanNewId}`);
+                    if (foldersToCopy.length > 0 && empData.driveFolderName) {
+                        await copySpecificSubfolders(empData.driveFolderName, newFolderName!, foldersToCopy);
+                        log.log("Documents copied successfully.");
+                    }
+                } catch (driveErr) {
+                    console.error("Failed to create/copy Drive folder for new ID:", driveErr);
+                }
+            })();
+            log.log(`Re-hired employee ${employeeId} as ${cleanNewId}. Created new record.`);
+        } else {
+            const folderName = empData?.driveFolderName;
+            log.log(`Rejoining employee ${employeeId} (${applicantName}) on ${rejoinDate}. New site: ${siteName}, Designation: ${designation}`);
+            await moveEmployeeFolder(applicantName, employeeId, 'restore_employee', folderName);
+        }
+        return;
+    } catch (serverErr: any) {
+        console.warn("[rejoinEmployeeServerCall] Cloud Function failed, running fallback logic:", serverErr);
+        if (serverErr.code === 'functions/already-exists' || serverErr.code === 'functions/permission-denied') {
+            throw serverErr;
+        }
+    }
+
     // NEW LOGIC: Re-hire with a new Employee ID
     if (newEmployeeId) {
         // check if new ID already exists across both collections
@@ -2593,7 +2767,6 @@ export const rejoinEmployee = async (
         }
         const newEmpRef = doc(db, EMPLOYEES_COLLECTION, newEmployeeId);
 
-        const applicantName = empData.applicantName || 'Unknown';
         const newFolderName = `${newEmployeeId} - ${applicantName}`;
 
         const initialAssignment: EmployeeAssignment = {
@@ -2739,9 +2912,6 @@ export const rejoinEmployee = async (
     }
 
     const folderName = empData?.driveFolderName;
-    const applicantName = empData?.applicantName ||
-        (empData?.profileData?.personalDetails?.fullName) ||
-        'Unknown';
 
     log.log(`Rejoining employee ${employeeId} (${applicantName}) on ${rejoinDate}. New site: ${siteName}, Designation: ${designation}`);
     // Only move folder if standard rejoin

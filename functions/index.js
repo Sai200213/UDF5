@@ -4505,3 +4505,664 @@ exports.processRequestReviewServer = functions.https.onCall(async (request) => {
         currentLevel: newLevel
     };
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLOUD-5: Atomic Employee Lifecycle State Machine
+// ─────────────────────────────────────────────────────────────────────────────
+
+exports.approveOnboardingServer = functions.https.onCall(async (request) => {
+    if (!request.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'You must be logged in to approve onboarding.');
+    }
+
+    const {
+        submissionId,
+        assignedEmployeeId,
+        siteId,
+        joiningDate,
+        profileCompletionData,
+        comments,
+        customRecruiter,
+        isBypass
+    } = request.data || {};
+
+    if (!submissionId || typeof submissionId !== 'string') {
+        throw new functions.https.HttpsError('invalid-argument', 'submissionId is required.');
+    }
+    if (!assignedEmployeeId || typeof assignedEmployeeId !== 'string' || !assignedEmployeeId.trim()) {
+        throw new functions.https.HttpsError('invalid-argument', 'assignedEmployeeId is required (e.g. HY123456).');
+    }
+
+    const db = admin.firestore();
+    const uid = request.auth.uid;
+    const token = request.auth.token || {};
+    const isSuperAdmin = token.isSuperAdmin === true || token.roleId === 'super-admin';
+    const permissions = Array.isArray(token.permissions) ? token.permissions : [];
+
+    // Verify permission: SUBMISSIONS_APPROVE or SuperAdmin
+    if (!isSuperAdmin && !permissions.includes('SUBMISSIONS_APPROVE')) {
+        const saSnap = await db.collection('staff_accounts').doc(uid).get();
+        const roleId = saSnap.exists ? saSnap.data().roleId : null;
+        let allowed = roleId === 'role-super-admin';
+        if (!allowed && roleId) {
+            const roleSnap = await db.collection('roles').doc(roleId).get();
+            if (roleSnap.exists && Array.isArray(roleSnap.data().permissions)) {
+                allowed = roleSnap.data().permissions.includes('SUBMISSIONS_APPROVE');
+            }
+        }
+        if (!allowed) {
+            throw new functions.https.HttpsError('permission-denied', 'Missing permission SUBMISSIONS_APPROVE.');
+        }
+    }
+
+    const cleanEmpId = assignedEmployeeId.trim().toUpperCase();
+
+    // 1. Check if assigned Employee ID is already taken across employees & onboarding_submissions
+    const [empDocCheck, empFieldCheck, subFieldCheck] = await Promise.all([
+        db.collection('employees').doc(cleanEmpId).get(),
+        db.collection('employees').where('employeeId', '==', cleanEmpId).limit(1).get(),
+        db.collection('onboarding_submissions').where('employeeId', '==', cleanEmpId).limit(1).get()
+    ]);
+    if (empDocCheck.exists || !empFieldCheck.empty) {
+        throw new functions.https.HttpsError('already-exists', `Employee ID "${cleanEmpId}" is already taken by an existing employee.`);
+    }
+    if (!subFieldCheck.empty && subFieldCheck.docs[0].id !== submissionId) {
+        throw new functions.https.HttpsError('already-exists', `Employee ID "${cleanEmpId}" is already assigned to submission "${subFieldCheck.docs[0].id}".`);
+    }
+
+    // 2. Fetch submission doc
+    const subRef = db.collection('onboarding_submissions').doc(submissionId);
+    const subSnap = await subRef.get();
+    if (!subSnap.exists) {
+        throw new functions.https.HttpsError('not-found', `Submission "${submissionId}" not found.`);
+    }
+    const subData = subSnap.data();
+
+    // 2.5 Live gatekeeper check against duplicate active employees
+    if (subData.duplicateCheck && subData.duplicateCheck.isDuplicate) {
+        if (subData.duplicateCheck.matchType === 'EXISTING_ACTIVE_EMPLOYEE') {
+            throw new functions.https.HttpsError('failed-precondition', `Cannot Approve: Active employee "${subData.duplicateCheck.matchedName}" (${subData.duplicateCheck.matchedId}) already exists with the same ${subData.duplicateCheck.matchedField} (${subData.duplicateCheck.matchedValue}). Duplicate employment under multiple IDs is not permitted.`);
+        }
+        if (subData.duplicateCheck.matchType === 'DUPLICATE_SUBMISSION') {
+            throw new functions.https.HttpsError('failed-precondition', `Cannot Approve: Duplicate submission detected (${subData.duplicateCheck.submissionId}).`);
+        }
+    }
+
+    // 3. Site authorization check
+    const subSiteId = siteId || subData.siteId || (subData.formData && subData.formData.siteId) || '';
+    if (subSiteId && !isSuperAdmin) {
+        const hasGlobalScope = permissions.includes('EMPLOYEES_VIEW_SCOPE_ALL') ||
+            permissions.includes('SUBMISSIONS_VIEW_SCOPE_ALL') ||
+            permissions.includes('MANAGE_SITES') ||
+            permissions.includes('MANAGE_ALL_SITES');
+        const sitesManaged = Array.isArray(token.sitesManaged) ? token.sitesManaged : [];
+        if (!hasGlobalScope && !sitesManaged.includes(subSiteId)) {
+            const sitesSnap = await db.collection('settings').doc('sites').get();
+            const siteList = sitesSnap.exists ? (sitesSnap.data().sites || []) : [];
+            const targetSite = siteList.find(s => s && s.id === subSiteId);
+            const supIds = targetSite && Array.isArray(targetSite.supervisorIds) ? targetSite.supervisorIds : (targetSite ? [targetSite.supervisorId] : []);
+            if (!supIds.includes(uid)) {
+                throw new functions.https.HttpsError('permission-denied', `You do not have management authority for site "${subSiteId}".`);
+            }
+        }
+    }
+
+    const employeeName = (subData.applicantName || 'Unknown').trim();
+    const newFolderName = `${cleanEmpId} - ${employeeName}`;
+    const resolvedJoiningDate = joiningDate ? new Date(joiningDate).toISOString() : new Date().toISOString();
+    const initialSiteId = subSiteId || 'Unassigned';
+
+    const initialAssignment = {
+        id: db.collection('_').doc().id,
+        siteId: initialSiteId,
+        designation: (subData.formData && subData.formData.designation) || 'Staff',
+        type: 'PRIMARY',
+        joiningDate: resolvedJoiningDate,
+        status: 'Active'
+    };
+    if (subData.formData && subData.formData.subUnitId) {
+        initialAssignment.subUnitId = subData.formData.subUnitId;
+    }
+
+    // Storage path migration in profile data
+    const oldStoragePath = `onboarding/${submissionId}`;
+    const newStoragePath = `employees/${submissionId}/joining`;
+    const updatedProfileData = { ...(subData.formData || subData.data || {}) };
+
+    try {
+        const bucket = admin.storage().bucket();
+        const [files] = await bucket.getFiles({ prefix: `${oldStoragePath}/` });
+        for (const file of files) {
+            const destPath = file.name.replace(oldStoragePath, newStoragePath);
+            await file.copy(destPath);
+            await file.delete().catch(() => {});
+        }
+    } catch (storageErr) {
+        console.warn(`[approveOnboardingServer] Storage move warning for ${submissionId}:`, storageErr.message);
+    }
+
+    // Construct new Employee record
+    const empDocRef = db.collection('employees').doc(submissionId);
+    const newEmployee = {
+        uid: subData.linkedUid || subData.uid || submissionId,
+        employeeId: cleanEmpId,
+        portalId: submissionId,
+        profileData: updatedProfileData,
+        data: updatedProfileData,
+        currentSiteId: initialSiteId,
+        siteName: (subData.formData && subData.formData.siteName) || 'N/A',
+        activeAssignments: [initialAssignment],
+        assignedSiteIds: [initialSiteId],
+        assignmentHistory: [],
+        employmentHistory: [],
+        originalJoiningDate: resolvedJoiningDate,
+        joiningDate: resolvedJoiningDate,
+        leaveBalance: {
+            casual: 12,
+            sick: 7,
+            privilege: 15
+        },
+        isActive: true,
+        isRelieved: false,
+        applicantName: employeeName,
+        driveFolderName: newFolderName,
+        authProvider: subData.authProvider || 'manual',
+        linkedGoogleEmail: subData.linkedGoogleEmail || '',
+        needsProfileCompletion: profileCompletionData?.profileCompletionStatus === 'INCOMPLETE',
+        profileStatus: profileCompletionData?.profileCompletionStatus === 'INCOMPLETE' ? 'waiting_for_employee' : 'approved',
+        profileCompletionStatus: profileCompletionData?.profileCompletionStatus === 'INCOMPLETE' ? 'INCOMPLETE' : 'COMPLETE',
+        pendingProfileFields: profileCompletionData?.profileCompletionStatus === 'INCOMPLETE' ? (profileCompletionData?.pendingProfileFields || []) : [],
+        pendingProfileNote: profileCompletionData?.profileCompletionStatus === 'INCOMPLETE' ? (profileCompletionData?.pendingProfileNote || '') : '',
+        aadhaarNumber: subData.aadhaarNumber || null,
+        panNumber: subData.panNumber || null,
+        uanNumber: subData.uanNumber || null,
+        phoneNumber: subData.phoneNumber || null,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastUpdated: new Date().toISOString()
+    };
+
+    if (subData.passwordHash) {
+        newEmployee.passwordHash = subData.passwordHash;
+        newEmployee.isDefaultPassword = subData.isDefaultPassword || false;
+    }
+
+    if (customRecruiter) {
+        newEmployee.recruitedBy = customRecruiter.id || null;
+        newEmployee.recruitedByName = customRecruiter.name || null;
+    }
+
+    // Atomic batch
+    const batch = db.batch();
+    batch.set(empDocRef, newEmployee);
+
+    // Update submission
+    const historyEntry = {
+        level: subData.currentLevel || 1,
+        status: 'Approved',
+        actionBy: token.name || 'Admin',
+        actionByRole: token.roleId || 'Admin',
+        comments: comments || '',
+        timestamp: new Date().toISOString()
+    };
+
+    const subUpdates = {
+        status: 'Approved',
+        employeeId: cleanEmpId,
+        driveFolderName: newFolderName,
+        applicantName: employeeName,
+        joiningDate: resolvedJoiningDate,
+        approvalHistory: [...(subData.approvalHistory || []), historyEntry],
+        lastUpdated: new Date().toISOString()
+    };
+    if (profileCompletionData) {
+        subUpdates.profileCompletionStatus = profileCompletionData.profileCompletionStatus;
+        subUpdates.pendingProfileFields = profileCompletionData.pendingProfileFields || [];
+        subUpdates.pendingProfileNote = profileCompletionData.pendingProfileNote || '';
+        subUpdates.needsProfileCompletion = profileCompletionData.profileCompletionStatus === 'INCOMPLETE';
+    }
+    batch.update(subRef, subUpdates);
+
+    // Link previous employee record if rehire
+    if (subData.duplicateCheck?.matchType === 'EX_EMPLOYEE_REHIRE' && subData.duplicateCheck.matchedId) {
+        const prevDoc = await resolveEmployeeDocAdmin(db, subData.duplicateCheck.matchedId);
+        if (prevDoc && prevDoc.exists) {
+            batch.update(prevDoc.ref, { rehiredAs: cleanEmpId });
+        }
+    }
+
+    // Increment invite joined count if referral
+    if (subData.inviteId) {
+        const inviteRef = db.collection('referral_invites').doc(subData.inviteId);
+        batch.update(inviteRef, { joined: admin.firestore.FieldValue.increment(1) });
+    }
+
+    // Append to audit_logs
+    const auditRef = db.collection('audit_logs').doc();
+    batch.set(auditRef, {
+        action: 'APPROVAL',
+        module: 'ONBOARDING',
+        targetId: submissionId,
+        actorId: uid,
+        actorName: token.name || 'Admin',
+        details: `Final approval for ${employeeName} (${submissionId}). Assigned Employee ID: ${cleanEmpId}`,
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // In-app notification to employee
+    const notifRef = db.collection('notifications').doc();
+    batch.set(notifRef, {
+        targetUserId: cleanEmpId,
+        message: `Welcome to UDF! Your onboarding has been approved. Your Employee ID is ${cleanEmpId}.`,
+        type: 'success',
+        link: '/employee/dashboard',
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        timestamp: new Date().toISOString()
+    });
+
+    await batch.commit();
+
+    console.log(`[approveOnboardingServer] Successfully approved submission ${submissionId} as ${cleanEmpId}`);
+    return {
+        success: true,
+        submissionId,
+        employeeId: cleanEmpId
+    };
+});
+
+exports.relieveEmployeeServer = functions.https.onCall(async (request) => {
+    if (!request.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'You must be logged in to relieve employees.');
+    }
+
+    const {
+        employeeId,
+        relievingDate,
+        reason,
+        remarks
+    } = request.data || {};
+
+    if (!employeeId || typeof employeeId !== 'string') {
+        throw new functions.https.HttpsError('invalid-argument', 'employeeId is required.');
+    }
+    if (!relievingDate || typeof relievingDate !== 'string') {
+        throw new functions.https.HttpsError('invalid-argument', 'relievingDate is required.');
+    }
+
+    const db = admin.firestore();
+    const uid = request.auth.uid;
+    const token = request.auth.token || {};
+    const isSuperAdmin = token.isSuperAdmin === true || token.roleId === 'super-admin';
+    const permissions = Array.isArray(token.permissions) ? token.permissions : [];
+
+    // Verify permission: RESIGNATIONS_APPROVE, DELETE_EMPLOYEE, or SuperAdmin
+    if (!isSuperAdmin && !permissions.includes('RESIGNATIONS_APPROVE') && !permissions.includes('DELETE_EMPLOYEE')) {
+        throw new functions.https.HttpsError('permission-denied', 'Missing permission to relieve employees.');
+    }
+
+    // Resolve employee document
+    const empSnap = await resolveEmployeeDocAdmin(db, employeeId);
+    if (!empSnap || !empSnap.exists) {
+        throw new functions.https.HttpsError('not-found', `Employee "${employeeId}" not found.`);
+    }
+    const empData = empSnap.data();
+
+    // Site authority check
+    const siteId = empData.currentSiteId || '';
+    if (siteId && !isSuperAdmin) {
+        const hasGlobalScope = permissions.includes('EMPLOYEES_VIEW_SCOPE_ALL') ||
+            permissions.includes('SUBMISSIONS_VIEW_SCOPE_ALL') ||
+            permissions.includes('MANAGE_SITES') ||
+            permissions.includes('MANAGE_ALL_SITES');
+        const sitesManaged = Array.isArray(token.sitesManaged) ? token.sitesManaged : [];
+        if (!hasGlobalScope && !sitesManaged.includes(siteId)) {
+            const sitesSnap = await db.collection('settings').doc('sites').get();
+            const siteList = sitesSnap.exists ? (sitesSnap.data().sites || []) : [];
+            const targetSite = siteList.find(s => s && s.id === siteId);
+            const supIds = targetSite && Array.isArray(targetSite.supervisorIds) ? targetSite.supervisorIds : (targetSite ? [targetSite.supervisorId] : []);
+            if (!supIds.includes(uid)) {
+                throw new functions.https.HttpsError('permission-denied', `You do not have management authority for site "${siteId}".`);
+            }
+        }
+    }
+
+    const cleanReason = reason || 'Resignation';
+    const cleanRemarks = remarks || '';
+
+    const batch = db.batch();
+
+    // 1. Mark employee record relieved
+    batch.update(empSnap.ref, {
+        isActive: false,
+        status: 'Relieved',
+        isRelieved: true,
+        relievingDate,
+        relievingReason: cleanReason,
+        relievingRemarks: cleanRemarks,
+        relievedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // 2. Sync to onboarding_submissions
+    const subSnap = await resolveSubmissionDocAdmin(db, empData.employeeId, empSnap.id);
+    if (subSnap && subSnap.exists) {
+        batch.update(subSnap.ref, {
+            isActive: false,
+            status: 'Relieved',
+            isRelieved: true,
+            relievingDate,
+            relievingReason: cleanReason,
+            relievingRemarks: cleanRemarks
+        });
+    }
+
+    // 3. Disable Firebase Auth account if linked UID exists
+    const linkedUid = empData.linkedUid || empData.uid;
+    if (linkedUid && linkedUid !== 'none' && linkedUid.length > 5) {
+        try {
+            await admin.auth().updateUser(linkedUid, { disabled: true });
+            console.log(`[relieveEmployeeServer] Disabled Firebase Auth user ${linkedUid} for ${empData.employeeId}`);
+        } catch (authErr) {
+            console.warn(`[relieveEmployeeServer] Could not disable Firebase Auth user ${linkedUid}:`, authErr.message);
+        }
+    }
+
+    // 4. Append to audit_logs
+    const auditRef = db.collection('audit_logs').doc();
+    batch.set(auditRef, {
+        action: 'STATUS_CHANGE',
+        module: 'EMPLOYEES',
+        targetId: empData.employeeId || empSnap.id,
+        actorId: uid,
+        actorName: token.name || 'Admin',
+        details: `Relieved employee ${empData.applicantName || empData.employeeId} (${empData.employeeId || empSnap.id}) on ${relievingDate}. Reason: ${cleanReason}`,
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // 5. In-app notification
+    const notifRef = db.collection('notifications').doc();
+    batch.set(notifRef, {
+        targetUserId: empData.employeeId || empSnap.id,
+        message: `Your employment has been relieved effective ${relievingDate}. Reason: ${cleanReason}.`,
+        type: 'info',
+        link: '/employee/dashboard',
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        timestamp: new Date().toISOString()
+    });
+
+    await batch.commit();
+
+    console.log(`[relieveEmployeeServer] Successfully relieved employee ${empData.employeeId || empSnap.id} on ${relievingDate}`);
+    return {
+        success: true,
+        employeeId: empData.employeeId || empSnap.id,
+        relievingDate
+    };
+});
+
+exports.rejoinEmployeeServer = functions.https.onCall(async (request) => {
+    if (!request.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'You must be logged in to rejoin employees.');
+    }
+
+    const {
+        employeeId,
+        newEmployeeId,
+        rejoinDate,
+        siteId,
+        siteName,
+        subUnitId,
+        subUnitName,
+        designation,
+        foldersToCopy
+    } = request.data || {};
+
+    if (!employeeId || typeof employeeId !== 'string') {
+        throw new functions.https.HttpsError('invalid-argument', 'employeeId is required.');
+    }
+    if (!rejoinDate || typeof rejoinDate !== 'string') {
+        throw new functions.https.HttpsError('invalid-argument', 'rejoinDate is required.');
+    }
+
+    const db = admin.firestore();
+    const uid = request.auth.uid;
+    const token = request.auth.token || {};
+    const isSuperAdmin = token.isSuperAdmin === true || token.roleId === 'super-admin';
+    const permissions = Array.isArray(token.permissions) ? token.permissions : [];
+
+    // Verify permission: SUBMISSIONS_APPROVE or SuperAdmin
+    if (!isSuperAdmin && !permissions.includes('SUBMISSIONS_APPROVE')) {
+        throw new functions.https.HttpsError('permission-denied', 'Missing permission to rejoin employees.');
+    }
+
+    // Resolve original employee document
+    const origEmpSnap = await resolveEmployeeDocAdmin(db, employeeId);
+    if (!origEmpSnap || !origEmpSnap.exists) {
+        throw new functions.https.HttpsError('not-found', `Original employee record "${employeeId}" not found.`);
+    }
+    const origData = origEmpSnap.data();
+
+    const resolvedSiteId = siteId || origData.currentSiteId || 'Unassigned';
+    const resolvedSiteName = siteName || origData.siteName || 'N/A';
+    const resolvedDesignation = designation || origData.designation || 'Staff';
+    const applicantName = origData.applicantName || 'Unknown';
+
+    const cleanNewId = (newEmployeeId && typeof newEmployeeId === 'string' && newEmployeeId.trim()) 
+        ? newEmployeeId.trim().toUpperCase() 
+        : null;
+
+    // PATH A: Re-hire with a NEW Employee ID
+    if (cleanNewId && cleanNewId !== (origData.employeeId || origEmpSnap.id).toUpperCase()) {
+        // Check if new Employee ID is already taken
+        const [empDocCheck, empFieldCheck, subFieldCheck] = await Promise.all([
+            db.collection('employees').doc(cleanNewId).get(),
+            db.collection('employees').where('employeeId', '==', cleanNewId).limit(1).get(),
+            db.collection('onboarding_submissions').where('employeeId', '==', cleanNewId).limit(1).get()
+        ]);
+        if (empDocCheck.exists || !empFieldCheck.empty || !subFieldCheck.empty) {
+            throw new functions.https.HttpsError('already-exists', `Employee ID "${cleanNewId}" is already taken.`);
+        }
+
+        const initialAssignment = {
+            id: db.collection('_').doc().id,
+            siteId: resolvedSiteId,
+            subUnitId: subUnitId || null,
+            designation: resolvedDesignation,
+            type: 'PRIMARY',
+            joiningDate: rejoinDate,
+            status: 'Active'
+        };
+
+        const newFolderName = `${cleanNewId} - ${applicantName}`;
+        const newEmpRef = db.collection('employees').doc(cleanNewId);
+
+        const hasJoiningDocs = Array.isArray(foldersToCopy) && foldersToCopy.includes("Joining Documents");
+        const profileStatus = hasJoiningDocs ? 'approved' : 'waiting_for_employee';
+        const needsCompletion = !hasJoiningDocs;
+
+        const newEmployeeData = {
+            ...origData,
+            uid: '',
+            employeeId: cleanNewId,
+            portalId: cleanNewId,
+            isActive: true,
+            isRelieved: false,
+            isBlocked: false,
+            joiningDate: rejoinDate,
+            originalJoiningDate: rejoinDate,
+            currentSiteId: resolvedSiteId,
+            siteName: resolvedSiteName,
+            subUnitId: subUnitId || null,
+            subUnitName: subUnitName || null,
+            designation: resolvedDesignation,
+            activeAssignments: [initialAssignment],
+            assignedSiteIds: [resolvedSiteId],
+            assignmentHistory: [],
+            employmentHistory: [],
+            driveFolderName: newFolderName,
+            needsProfileCompletion: needsCompletion,
+            profileStatus: profileStatus,
+            importedVia: 'rejoin',
+            previousEmployeeId: origData.employeeId || origEmpSnap.id,
+            leaveBalance: {
+                casual: 12,
+                sick: 7,
+                privilege: 15
+            },
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            lastUpdated: new Date().toISOString()
+        };
+
+        delete newEmployeeData.relievingDate;
+        delete newEmployeeData.relievingReason;
+        delete newEmployeeData.relievingRemarks;
+        delete newEmployeeData.relievedAt;
+
+        const batch = db.batch();
+
+        // 1. Create new employee record
+        batch.set(newEmpRef, newEmployeeData);
+
+        // 2. Link rehiredAs on original record
+        batch.update(origEmpSnap.ref, {
+            rehiredAs: cleanNewId,
+            lastUpdated: new Date().toISOString()
+        });
+
+        // 3. Append to audit_logs
+        const auditRef = db.collection('audit_logs').doc();
+        batch.set(auditRef, {
+            action: 'STATUS_CHANGE',
+            module: 'EMPLOYEES',
+            targetId: cleanNewId,
+            actorId: uid,
+            actorName: token.name || 'Admin',
+            details: `Rejoined employee ${applicantName} as ${cleanNewId} (previous ID: ${origData.employeeId || origEmpSnap.id}) at ${resolvedSiteName} on ${rejoinDate}`,
+            timestamp: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        // 4. In-app notification
+        const notifRef = db.collection('notifications').doc();
+        batch.set(notifRef, {
+            targetUserId: cleanNewId,
+            message: `Welcome back to UDF! You have been rejoined as ${cleanNewId} at ${resolvedSiteName}.`,
+            type: 'success',
+            link: '/employee/dashboard',
+            read: false,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            timestamp: new Date().toISOString()
+        });
+
+        await batch.commit();
+
+        console.log(`[rejoinEmployeeServer] Successfully rejoined ${employeeId} as ${cleanNewId}`);
+        return {
+            success: true,
+            isNewRecord: true,
+            previousEmployeeId: employeeId,
+            newEmployeeId: cleanNewId
+        };
+    }
+
+    // PATH B: Standard Rejoin (reactivate existing employee record)
+    const historyEntry = {
+        joiningDate: origData.joiningDate || new Date().toISOString(),
+        relievingDate: origData.relievingDate || new Date().toISOString(),
+        relievingReason: origData.relievingReason || 'Other'
+    };
+
+    const newAssignment = {
+        id: db.collection('_').doc().id,
+        siteId: resolvedSiteId,
+        subUnitId: subUnitId || null,
+        designation: resolvedDesignation,
+        type: 'PRIMARY',
+        joiningDate: rejoinDate,
+        status: 'Active'
+    };
+
+    const batch = db.batch();
+
+    // 1. Reactivate existing employee record
+    batch.update(origEmpSnap.ref, {
+        isActive: true,
+        status: 'Active',
+        isRelieved: false,
+        isBlocked: false,
+        relievingDate: admin.firestore.FieldValue.delete(),
+        relievingReason: admin.firestore.FieldValue.delete(),
+        relievingRemarks: admin.firestore.FieldValue.delete(),
+        relievedAt: admin.firestore.FieldValue.delete(),
+        joiningDate: rejoinDate,
+        originalJoiningDate: origData.originalJoiningDate || origData.joiningDate || rejoinDate,
+        currentSiteId: resolvedSiteId,
+        siteName: resolvedSiteName,
+        subUnitId: subUnitId || null,
+        subUnitName: subUnitName || null,
+        designation: resolvedDesignation,
+        employmentHistory: [...(origData.employmentHistory || []), historyEntry],
+        activeAssignments: [newAssignment],
+        assignmentHistory: [...(origData.assignmentHistory || []), newAssignment],
+        assignedSiteIds: [resolvedSiteId],
+        lastUpdated: new Date().toISOString()
+    });
+
+    // 2. Sync to submission doc if exists
+    const subSnap = await resolveSubmissionDocAdmin(db, origData.employeeId, origEmpSnap.id);
+    if (subSnap && subSnap.exists) {
+        batch.update(subSnap.ref, {
+            isActive: true,
+            status: 'Approved',
+            isRelieved: false,
+            relievingDate: admin.firestore.FieldValue.delete(),
+            relievingReason: admin.firestore.FieldValue.delete(),
+            relievingRemarks: admin.firestore.FieldValue.delete(),
+            lastUpdated: new Date().toISOString()
+        });
+    }
+
+    // 3. Re-enable Firebase Auth user if disabled
+    const linkedUid = origData.linkedUid || origData.uid;
+    if (linkedUid && linkedUid !== 'none' && linkedUid.length > 5) {
+        try {
+            await admin.auth().updateUser(linkedUid, { disabled: false });
+            console.log(`[rejoinEmployeeServer] Re-enabled Firebase Auth user ${linkedUid} for ${origData.employeeId}`);
+        } catch (authErr) {
+            console.warn(`[rejoinEmployeeServer] Could not re-enable Auth user ${linkedUid}:`, authErr.message);
+        }
+    }
+
+    // 4. Audit log
+    const auditRef = db.collection('audit_logs').doc();
+    batch.set(auditRef, {
+        action: 'STATUS_CHANGE',
+        module: 'EMPLOYEES',
+        targetId: origData.employeeId || origEmpSnap.id,
+        actorId: uid,
+        actorName: token.name || 'Admin',
+        details: `Rejoined employee ${applicantName} (${origData.employeeId || origEmpSnap.id}) at ${resolvedSiteName} on ${rejoinDate}`,
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // 5. Notification
+    const notifRef = db.collection('notifications').doc();
+    batch.set(notifRef, {
+        targetUserId: origData.employeeId || origEmpSnap.id,
+        message: `Welcome back to UDF! Your account has been reactivated at ${resolvedSiteName}.`,
+        type: 'success',
+        link: '/employee/dashboard',
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        timestamp: new Date().toISOString()
+    });
+
+    await batch.commit();
+
+    console.log(`[rejoinEmployeeServer] Successfully reactivated employee ${origData.employeeId || origEmpSnap.id}`);
+    return {
+        success: true,
+        isNewRecord: false,
+        employeeId: origData.employeeId || origEmpSnap.id,
+        rejoinDate
+    };
+});
