@@ -1065,6 +1065,18 @@ export const submitEmployeeForm = async (
 };
 
 export const syncSubmissionToGoogleForm = async (submissionId: string): Promise<{ success: boolean; error?: string }> => {
+    // 1. CLOUD-7: Execute server-side googleapis Sheets / Form sync
+    try {
+        log.log(`[FORM_SYNC] Calling syncSubmissionToSheetsServer for ${submissionId}...`);
+        const syncFormFn = httpsCallable<{ submissionId: string }, { success: boolean; status?: string }>(functions, 'syncSubmissionToSheetsServer');
+        const res = await syncFormFn({ submissionId });
+        log.log(`[FORM_SYNC] ✅ Server-side sync completed:`, res.data);
+        return { success: true };
+    } catch (serverErr: any) {
+        console.warn(`[FORM_SYNC] Server-side Form sync failed, executing client fallback:`, serverErr?.message || serverErr);
+    }
+
+    // 2. Client fallback
     try {
         const subDocRef = doc(db, SUBMISSIONS_COLLECTION, submissionId);
         const snap = await getDoc(subDocRef);
@@ -3181,6 +3193,18 @@ export const updateEmployeeRecruiter = async (
 };
 
 export const syncDriveFolder = async (recordId: string) => {
+    // 1. CLOUD-7: Execute server-side googleapis Drive & Sheets sync
+    try {
+        log.log(`[DRIVE_SYNC] Calling syncEmployeeToGoogleDriveServer for ${recordId}...`);
+        const syncDriveFn = httpsCallable<{ recordId: string; targetType?: string }, { success: boolean; count: number; folderUrl?: string; driveUrls?: Record<string, string> }>(functions, 'syncEmployeeToGoogleDriveServer');
+        const res = await syncDriveFn({ recordId });
+        log.log(`[DRIVE_SYNC] ✅ Server-side Drive sync completed:`, res.data);
+        return { success: true, count: res.data?.count || 0, folderUrl: res.data?.folderUrl };
+    } catch (serverErr: any) {
+        console.warn(`[DRIVE_SYNC] Server-side Drive sync failed, executing client fallback:`, serverErr?.message || serverErr);
+    }
+
+    // 2. Client fallback
     let targetDocRef = doc(db, EMPLOYEES_COLLECTION, recordId);
     let targetSnap = await getDoc(targetDocRef);
     let isEmployee = true;

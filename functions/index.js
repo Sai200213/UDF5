@@ -4074,6 +4074,15 @@ exports.onSubmissionCreated = onDocumentCreated("onboarding_submissions/{submiss
             await snap.ref.update(updates);
         }
 
+        // 6. Automated Server-Side Drive & Sheets Sync (CLOUD-7)
+        try {
+            console.log(`[TRIGGER: onSubmissionCreated] Initiating automated server-side Drive & Sheets sync for ${submissionId}...`);
+            await syncRecordToDriveAndSheetsCore(submissionId, 'submission');
+            console.log(`[TRIGGER: onSubmissionCreated] ✅ Automated Drive & Sheets sync completed for ${submissionId}`);
+        } catch (syncErr) {
+            console.warn(`[TRIGGER: onSubmissionCreated] Background Drive/Sheets sync encountered non-fatal error:`, syncErr.message);
+        }
+
         console.log(`[TRIGGER: onSubmissionCreated] Successfully processed ${submissionId}`);
     } catch (err) {
         console.error(`[TRIGGER: onSubmissionCreated] Error processing ${submissionId}:`, err);
@@ -5298,4 +5307,531 @@ exports.completeTrainingQuizServer = functions.https.onCall(async (request) => {
         isCorrect: true,
         pointsEarned: quizPoints
     };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLOUD-7: NATIVE GOOGLE DRIVE & GOOGLE SHEETS DIRECT INTEGRATION (googleapis)
+// ─────────────────────────────────────────────────────────────────────────────
+const { google } = require('googleapis');
+const GOOGLE_FORM_MAPPING = require('./googleFormMapping');
+
+const ROOT_DRIVE_FOLDER_ID = "1XuFLT5v5s1ZSdugKr1XzT0AdYkL-QgBX";
+const APPS_SCRIPT_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbz7dCyY67bQuB9OWdwZ8UvVK9EY1XOwtkpY6UKQks0MyHFZV4drG5L6eZK5HKPO0vI/exec";
+const DRIVE_ROOT_FOLDERS = {
+    PENDING: 'Pending Employees',
+    ACTIVE: 'Active Employees',
+    RELIEVED: 'Relieved Employees',
+    RECYCLE_BIN: 'Recycle Bin',
+    BLOCKED: 'Blocked Employees'
+};
+
+function getGoogleAuthClient() {
+    return new google.auth.GoogleAuth({
+        scopes: [
+            'https://www.googleapis.com/auth/drive',
+            'https://www.googleapis.com/auth/drive.file',
+            'https://www.googleapis.com/auth/spreadsheets'
+        ]
+    });
+}
+
+/**
+ * Searches for or creates a folder inside a parent folder in Google Drive.
+ */
+async function getOrCreateDriveFolderServer(drive, parentId, folderName) {
+    try {
+        const q = `'${parentId}' in parents and name = '${folderName.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+        const res = await drive.files.list({
+            q,
+            fields: 'files(id, name, webViewLink)',
+            spaces: 'drive',
+            pageSize: 1,
+            supportsAllDrives: true,
+            includeItemsFromAllDrives: true
+        });
+
+        if (res.data.files && res.data.files.length > 0) {
+            return res.data.files[0];
+        }
+
+        const createRes = await drive.files.create({
+            requestBody: {
+                name: folderName,
+                mimeType: 'application/vnd.google-apps.folder',
+                parents: [parentId]
+            },
+            fields: 'id, name, webViewLink',
+            supportsAllDrives: true
+        });
+
+        return createRes.data;
+    } catch (err) {
+        console.warn(`[getOrCreateDriveFolderServer] Error finding/creating folder "${folderName}":`, err.message);
+        throw err;
+    }
+}
+
+/**
+ * Streams a file directly from Firebase Cloud Storage bucket to Google Drive using googleapis.
+ * Direct streaming eliminates base64 memory overhead and client timeouts.
+ * Keeps permissions restricted to domain/service account without ANYONE_WITH_LINK.
+ */
+async function streamStorageFileToDriveServer(drive, storagePath, targetFolderId, customName) {
+    const bucket = admin.storage().bucket();
+    const file = bucket.file(storagePath);
+    const [exists] = await file.exists();
+    if (!exists) {
+        throw new Error(`File not found in storage: ${storagePath}`);
+    }
+
+    const [metadata] = await file.getMetadata();
+    const mimeType = metadata.contentType || 'application/octet-stream';
+    const fileName = customName || storagePath.split('/').pop() || 'document.pdf';
+
+    // Stream directly from Cloud Storage without loading entire file into memory buffer
+    const readStream = file.createReadStream();
+
+    const uploadRes = await drive.files.create({
+        requestBody: {
+            name: fileName,
+            parents: [targetFolderId]
+        },
+        media: {
+            mimeType,
+            body: readStream
+        },
+        fields: 'id, name, webViewLink, webContentLink',
+        supportsAllDrives: true
+    });
+
+    return {
+        fileId: uploadRes.data.id,
+        url: uploadRes.data.webViewLink || `https://drive.google.com/file/d/${uploadRes.data.id}/view`
+    };
+}
+
+/**
+ * Fallback server-side upload to Apps Script proxy if GCP Service Account Drive permissions are not yet configured on the target drive folder.
+ * Executed 100% server-to-server so client browser never deals with base64 memory bloat.
+ */
+async function uploadFileViaAppsScriptServer(storagePath, targetName, uniqueId, folderType) {
+    const bucket = admin.storage().bucket();
+    const file = bucket.file(storagePath);
+    const [exists] = await file.exists();
+    if (!exists) throw new Error(`File not found: ${storagePath}`);
+
+    const [buffer] = await file.download();
+    const base64 = buffer.toString('base64');
+    const fileName = storagePath.split('/').pop() || 'document.pdf';
+
+    const response = await fetch(APPS_SCRIPT_FALLBACK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({
+            filename: fileName,
+            base64: base64,
+            employeeName: targetName,
+            operationName: folderType || 'Joining Documents',
+            uniqueId: uniqueId,
+            token: 'server_admin'
+        })
+    });
+
+    const result = await response.json();
+    if (!result.success) throw new Error(result.error || 'Apps Script fallback failed');
+    return { fileId: result.fileId, url: result.url };
+}
+
+/**
+ * Core engine to sync a submission or employee record to Google Drive and Google Sheets / Form.
+ */
+async function syncRecordToDriveAndSheetsCore(recordId, explicitType) {
+    const db = admin.firestore();
+    let targetDocRef = db.collection('employees').doc(recordId);
+    let targetSnap = await targetDocRef.get();
+    let isEmployee = true;
+
+    if (!targetSnap.exists || explicitType === 'submission') {
+        targetDocRef = db.collection('onboarding_submissions').doc(recordId);
+        targetSnap = await targetDocRef.get();
+        isEmployee = false;
+        if (!targetSnap.exists) {
+            throw new Error(`Record ${recordId} not found in Employees or Submissions.`);
+        }
+    }
+
+    const recordData = targetSnap.data() || {};
+    const applicantName = recordData.applicantName || recordData.name || (recordData.profileData && recordData.profileData.personalDetails && recordData.profileData.personalDetails.fullName) || 'Candidate';
+    const folderId = recordData.employeeId || recordData.portalId || recordId;
+    const formData = recordData.formData || recordData.profileData || recordData.data || {};
+    const isPending = !isEmployee || folderId.startsWith('SUB-') || folderId.startsWith('UDF-') || !recordData.isActive;
+
+    console.log(`[CLOUD-7 syncRecordToDriveAndSheetsCore] Starting sync for ${applicantName} (${folderId})...`);
+
+    // 1. Collect all Storage paths from form data
+    const storagePaths = [];
+    const extractPaths = (obj, prefix = '') => {
+        if (!obj || typeof obj !== 'object') return;
+        for (const key of Object.keys(obj)) {
+            const val = obj[key];
+            if (typeof val === 'string' && (val.startsWith('onboarding/') || val.startsWith('employees/'))) {
+                storagePaths.push({ field: prefix ? `${prefix}.${key}` : key, path: val });
+            } else if (typeof val === 'object' && val !== null) {
+                if ('storagePath' in val && typeof val.storagePath === 'string') {
+                    storagePaths.push({ field: prefix ? `${prefix}.${key}` : key, path: val.storagePath });
+                } else {
+                    extractPaths(val, prefix ? `${prefix}.${key}` : key);
+                }
+            }
+        }
+    };
+    extractPaths(formData);
+
+    const updatedFormData = JSON.parse(JSON.stringify(formData));
+    let uploadedCount = 0;
+    let folderUrl = '';
+    const uploadedDriveUrls = {};
+
+    // 2. Initialize native googleapis Drive
+    let driveClient = null;
+    let joiningDocsFolderId = null;
+    try {
+        const auth = getGoogleAuthClient();
+        driveClient = google.drive({ version: 'v3', auth });
+
+        // Find or create parent folder (Pending Employees vs Active Employees)
+        const parentFolderName = isPending ? DRIVE_ROOT_FOLDERS.PENDING : DRIVE_ROOT_FOLDERS.ACTIVE;
+        const parentFolder = await getOrCreateDriveFolderServer(driveClient, ROOT_DRIVE_FOLDER_ID, parentFolderName);
+
+        // Find or create candidate folder
+        const candidateFolderName = `${folderId} - ${applicantName}`;
+        const candidateFolder = await getOrCreateDriveFolderServer(driveClient, parentFolder.id, candidateFolderName);
+        folderUrl = candidateFolder.webViewLink || `https://drive.google.com/drive/folders/${candidateFolder.id}`;
+
+        // Find or create "Joining Documents" subfolder
+        const joiningFolder = await getOrCreateDriveFolderServer(driveClient, candidateFolder.id, 'Joining Documents');
+        joiningDocsFolderId = joiningFolder.id;
+        console.log(`[CLOUD-7] Native Google Drive folder ready: ${candidateFolderName} (${joiningDocsFolderId})`);
+    } catch (authDriveErr) {
+        console.warn(`[CLOUD-7] Native Drive folder access failed (will use server fallback):`, authDriveErr.message);
+    }
+
+    // 3. Stream each file to Google Drive
+    for (const item of storagePaths) {
+        try {
+            const fileName = item.path.split('/').pop() || 'document.pdf';
+            let driveRes = null;
+
+            if (driveClient && joiningDocsFolderId) {
+                try {
+                    driveRes = await streamStorageFileToDriveServer(driveClient, item.path, joiningDocsFolderId, fileName);
+                    console.log(`[CLOUD-7] ✅ Streamed ${fileName} natively via googleapis to Drive (${driveRes.url})`);
+                } catch (streamErr) {
+                    console.warn(`[CLOUD-7] Direct stream error for ${fileName}, attempting server fallback:`, streamErr.message);
+                }
+            }
+
+            if (!driveRes) {
+                driveRes = await uploadFileViaAppsScriptServer(item.path, applicantName, folderId, 'Joining Documents');
+                console.log(`[CLOUD-7] ✅ Uploaded ${fileName} via server fallback to Drive (${driveRes.url})`);
+            }
+
+            if (driveRes && driveRes.url) {
+                uploadedCount++;
+                uploadedDriveUrls[item.field] = driveRes.url;
+
+                // Update field in updatedFormData
+                const fieldParts = item.field.split('.');
+                let curr = updatedFormData;
+                for (let i = 0; i < fieldParts.length - 1; i++) {
+                    if (!curr[fieldParts[i]]) curr[fieldParts[i]] = {};
+                    curr = curr[fieldParts[i]];
+                }
+                const lastKey = fieldParts[fieldParts.length - 1];
+                if (curr[lastKey] && typeof curr[lastKey] === 'object') {
+                    curr[lastKey].driveUrl = driveRes.url;
+                } else {
+                    curr[lastKey] = {
+                        storagePath: item.path,
+                        driveUrl: driveRes.url
+                    };
+                }
+            }
+        } catch (fileErr) {
+            console.warn(`[CLOUD-7] Error uploading ${item.path} to Drive:`, fileErr.message);
+        }
+    }
+
+    // 4. Update document in Firestore with Drive URLs
+    const updatePayload = {
+        driveBackupStatus: 'completed',
+        driveBackupAt: new Date().toISOString(),
+        ...(folderUrl ? { driveFolderUrl: folderUrl } : {})
+    };
+    if (isEmployee) {
+        updatePayload.data = updatedFormData;
+    } else {
+        updatePayload.formData = updatedFormData;
+    }
+    await targetDocRef.update(updatePayload);
+    console.log(`[CLOUD-7] Firestore doc ${recordId} updated with ${uploadedCount} Drive links.`);
+
+    // 5. Append row to Google Sheets via sheets.spreadsheets.values.append or Google Form
+    let sheetsSyncStatus = 'pending';
+    try {
+        sheetsSyncStatus = await appendSubmissionToSheetsServer(recordData, updatedFormData, folderUrl);
+        await targetDocRef.update({
+            googleFormSyncStatus: 'synced',
+            googleFormSyncedAt: new Date().toISOString(),
+            googleSheetsSyncStatus: sheetsSyncStatus
+        });
+    } catch (sheetErr) {
+        console.warn(`[CLOUD-7] Sheets sync warning for ${recordId}:`, sheetErr.message);
+    }
+
+    return {
+        success: true,
+        count: uploadedCount,
+        folderUrl,
+        driveUrls: uploadedDriveUrls,
+        sheetsStatus: sheetsSyncStatus
+    };
+}
+
+/**
+ * Appends candidate onboarding data to Google Sheets via sheets.spreadsheets.values.append()
+ * Falls back to server-side Google Form submission if no spreadsheet ID is configured.
+ */
+async function appendSubmissionToSheetsServer(recordData, formData, driveFolderUrl) {
+    const db = admin.firestore();
+
+    // 1. Check for configured Spreadsheet ID
+    const portalConfigSnap = await db.collection('settings').doc('portal_config').get();
+    const portalConfig = portalConfigSnap.exists ? portalConfigSnap.data() : {};
+    const spreadsheetId = portalConfig.googleSpreadsheetId || portalConfig.spreadsheetId || process.env.GOOGLE_SPREADSHEET_ID;
+
+    // Resolve Candidate Email
+    let email = recordData.linkedGoogleEmail || recordData.email || null;
+    if (!email && formData && typeof formData === 'object') {
+        if (formData.email && typeof formData.email === 'string' && formData.email.includes('@')) {
+            email = formData.email.trim();
+        } else if (formData.personalEmail && typeof formData.personalEmail === 'string' && formData.personalEmail.includes('@')) {
+            email = formData.personalEmail.trim();
+        } else if (formData.applicantEmail && typeof formData.applicantEmail === 'string' && formData.applicantEmail.includes('@')) {
+            email = formData.applicantEmail.trim();
+        } else {
+            for (const val of Object.values(formData)) {
+                if (typeof val === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val.trim())) {
+                    email = val.trim();
+                    break;
+                }
+            }
+        }
+    }
+
+    // Resolve Site Name
+    const SITE_FIELD_ID = '52ae217b-2602-4337-a1cd-a1f9bd36a4b0';
+    let resolvedSiteName = (recordData.siteName && typeof recordData.siteName === 'string') ? recordData.siteName.trim() : '';
+    const rawSiteVal = formData[SITE_FIELD_ID];
+    if (!resolvedSiteName && rawSiteVal && typeof rawSiteVal === 'string') {
+        try {
+            const sitesSnap = await db.collection('settings').doc('sites').get();
+            if (sitesSnap.exists) {
+                const sitesList = sitesSnap.data()?.sites || [];
+                const matchedSite = sitesList.find(s =>
+                    s.id === rawSiteVal ||
+                    (s.name && s.name.trim().toLowerCase() === rawSiteVal.trim().toLowerCase())
+                );
+                if (matchedSite && matchedSite.name) {
+                    resolvedSiteName = matchedSite.name;
+                }
+            }
+        } catch (e) {}
+    }
+
+    // Build row values according to GOOGLE_FORM_MAPPING
+    const textValues = {};
+    for (const [portalId, mapping] of Object.entries(GOOGLE_FORM_MAPPING.TEXT_FIELDS)) {
+        let val = formData[portalId];
+        if (portalId === SITE_FIELD_ID && resolvedSiteName) {
+            val = resolvedSiteName;
+        }
+        if (val !== undefined && val !== null) {
+            if (typeof val === 'string') textValues[mapping.title] = val.trim();
+            else if (typeof val === 'object') textValues[mapping.title] = val.driveUrl || val.storagePath || JSON.stringify(val);
+            else textValues[mapping.title] = String(val).trim();
+        } else {
+            textValues[mapping.title] = '';
+        }
+    }
+
+    const fileValues = {};
+    for (const [portalId, mapping] of Object.entries(GOOGLE_FORM_MAPPING.FILE_FIELDS)) {
+        const fileData = formData[portalId];
+        let url = '';
+        if (typeof fileData === 'string') {
+            url = fileData;
+        } else if (typeof fileData === 'object' && fileData !== null) {
+            url = fileData.driveUrl || fileData.storagePath || '';
+        }
+        fileValues[mapping.title] = url;
+    }
+
+    // Attempt direct googleapis Sheets append if spreadsheetId is configured
+    if (spreadsheetId) {
+        try {
+            const auth = getGoogleAuthClient();
+            const sheets = google.sheets({ version: 'v4', auth });
+
+            const row = [
+                new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+                email || '',
+                textValues['Name'] || recordData.applicantName || '',
+                textValues['Contact Number'] || recordData.contactNumber || '',
+                textValues['Gender'] || '',
+                textValues['Date of Birth'] || '',
+                textValues['Citizenship'] || '',
+                textValues['Blood Group'] || '',
+                textValues['Height'] || '',
+                textValues['Identity Marks'] || '',
+                textValues['Marital Status'] || '',
+                textValues['Spouse Name'] || '',
+                textValues['Qualification'] || '',
+                textValues['Post of Apply'] || '',
+                resolvedSiteName || textValues['Unit or Facility'] || '',
+                textValues['Any Police Case'] || '',
+                textValues['Previous Employment History'] || '',
+                textValues['Previous Company & Experience'] || '',
+                textValues['Present Address'] || '',
+                textValues['Permanent Address'] || '',
+                textValues['Reference Name'] || '',
+                textValues['Reference Relationship'] || '',
+                textValues['Reference Address'] || '',
+                textValues['Reference Contact No'] || '',
+                textValues['Father Name'] || '',
+                textValues['Mother Name'] || '',
+                textValues['Father Mobile Number'] || '',
+                textValues['Mother Mobile Number'] || '',
+                textValues['Aadhar Card No'] || '',
+                textValues['PAN Card No'] || '',
+                textValues['UAN No or EPFO'] || '',
+                textValues['ESI No'] || '',
+                textValues['PVC (Police Verification Certificate)'] || '',
+                textValues['PVC Number (If YES)'] || '',
+                textValues['Bank Name'] || '',
+                textValues['Account No'] || '',
+                textValues['IFSC Code'] || '',
+                textValues['Branch Name'] || '',
+                fileValues['Aadhar Card  (Front)'] || '',
+                fileValues['Aadhar Card  (Back)'] || '',
+                fileValues['PAN  Card'] || '',
+                fileValues['Bank Passbook or Cheque'] || '',
+                fileValues['SSC - 10th, INTER, DEGREE MEMO'] || '',
+                fileValues['Photo'] || '',
+                fileValues['PVC'] || '',
+                fileValues['Electricity Bill'] || '',
+                driveFolderUrl || ''
+            ];
+
+            await sheets.spreadsheets.values.append({
+                spreadsheetId,
+                range: 'Sheet1!A:Z',
+                valueInputOption: 'USER_ENTERED',
+                requestBody: {
+                    values: [row]
+                }
+            });
+
+            console.log(`[CLOUD-7] ✅ Appended row directly to Google Sheets (${spreadsheetId})`);
+            return 'sheets_appended';
+        } catch (sheetApiErr) {
+            console.warn(`[CLOUD-7] Direct Sheets API append error:`, sheetApiErr.message);
+        }
+    }
+
+    // Complementary / Fallback: Submit to Google Form / Apps Script Webhook server-side
+    const fields = [];
+    for (const [title, value] of Object.entries({ ...textValues, ...fileValues })) {
+        if (value && String(value).trim() !== '') {
+            fields.push({ title, value: String(value).trim() });
+        }
+    }
+    if (email) {
+        fields.push({ title: 'Email', value: email });
+        fields.push({ title: 'Email Address', value: email });
+        fields.push({ title: 'Email ID', value: email });
+    }
+
+    try {
+        const res = await fetch(APPS_SCRIPT_FALLBACK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain' },
+            body: JSON.stringify({
+                action: 'submit_to_form',
+                fields,
+                email: email || null,
+                token: 'server_admin'
+            })
+        });
+        const formRes = await res.json();
+        console.log(`[CLOUD-7] Server-side Form Sync Response:`, formRes);
+        return formRes.success ? 'form_synced' : 'form_sync_failed';
+    } catch (formErr) {
+        console.warn(`[CLOUD-7] Server-side Form sync HTTP error:`, formErr.message);
+        return 'form_sync_error';
+    }
+}
+
+// Callable wrapper for syncEmployeeToGoogleDriveServer
+exports.syncEmployeeToGoogleDriveServer = functions.https.onCall({ timeoutSeconds: 300, memory: '1GiB' }, async (request) => {
+    if (!request.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Must be authenticated to sync Drive files.');
+    }
+
+    const { recordId, targetType } = request.data || {};
+    if (!recordId) {
+        throw new functions.https.HttpsError('invalid-argument', 'Missing recordId.');
+    }
+
+    try {
+        return await syncRecordToDriveAndSheetsCore(recordId, targetType);
+    } catch (err) {
+        console.error(`[syncEmployeeToGoogleDriveServer] Error syncing ${recordId}:`, err);
+        throw new functions.https.HttpsError('internal', err.message || 'Drive sync failed');
+    }
+});
+
+// Callable wrapper for syncSubmissionToSheetsServer
+exports.syncSubmissionToSheetsServer = functions.https.onCall({ timeoutSeconds: 120 }, async (request) => {
+    if (!request.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Must be authenticated to sync submission.');
+    }
+
+    const { submissionId } = request.data || {};
+    if (!submissionId) {
+        throw new functions.https.HttpsError('invalid-argument', 'Missing submissionId.');
+    }
+
+    try {
+        const db = admin.firestore();
+        const subSnap = await db.collection('onboarding_submissions').doc(submissionId).get();
+        if (!subSnap.exists) {
+            throw new functions.https.HttpsError('not-found', `Submission ${submissionId} not found.`);
+        }
+        const data = subSnap.data() || {};
+        const formData = data.formData || data.data || {};
+        const folderUrl = data.driveFolderUrl || '';
+
+        const status = await appendSubmissionToSheetsServer(data, formData, folderUrl);
+        await subSnap.ref.update({
+            googleFormSyncStatus: 'synced',
+            googleFormSyncedAt: new Date().toISOString(),
+            googleSheetsSyncStatus: status
+        });
+
+        return { success: true, status };
+    } catch (err) {
+        console.error(`[syncSubmissionToSheetsServer] Error syncing ${submissionId}:`, err);
+        throw new functions.https.HttpsError('internal', err.message || 'Sheets sync failed');
+    }
 });
