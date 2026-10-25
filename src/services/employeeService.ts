@@ -1735,11 +1735,23 @@ export const updateSubmissionStatus = async (
 
             // ============================================================
             // STORAGE-APPROVAL: Move files from Onboarding to Employee folder
-            // Files are stored under onboarding/{uid}/ (joiner's Firebase Auth UID)
-            // Fallback to submissionId for legacy submissions before the rule change
+            // Dynamically inspect formData paths to find the exact source folder
+            // (could be submissionId, linkedUid, or original draftId)
             // ============================================================
-            const joinerUid = data.linkedUid || submissionId;
-            const oldStoragePath = `onboarding/${joinerUid}`;
+            let detectedFolder = submissionId;
+            if (data.formData && typeof data.formData === 'object') {
+                for (const val of Object.values(data.formData)) {
+                    const p = typeof val === 'string' ? val : (typeof val === 'object' && val !== null ? (val as any).storagePath : '');
+                    if (typeof p === 'string' && p.startsWith('onboarding/')) {
+                        const parts = p.split('/');
+                        if (parts[1]) {
+                            detectedFolder = parts[1];
+                            break;
+                        }
+                    }
+                }
+            }
+            const oldStoragePath = `onboarding/${detectedFolder}`;
             const newStoragePath = `employees/${submissionId}/joining`;
             
             // Logically update the formData with new storage paths
@@ -1774,11 +1786,14 @@ export const updateSubmissionStatus = async (
             try {
                 await moveStorageFiles(oldStoragePath, newStoragePath);
                 log.log(`[STORAGE_SYNC] Folder moved: "${oldStoragePath}" → "${newStoragePath}"`);
+                // If detectedFolder differs from linkedUid, also ensure linkedUid folder files are moved if any exist
+                if (data.linkedUid && detectedFolder !== data.linkedUid) {
+                    try {
+                        await moveStorageFiles(`onboarding/${data.linkedUid}`, newStoragePath);
+                    } catch {}
+                }
             } catch (storageErr: any) {
                 console.error("[STORAGE_SYNC_ERROR] Folder move failed:", storageErr);
-                // Note: We don't block the approval if Storage move fails (unlike Drive) 
-                // because the paths in Firestore are now updated, and the user can re-upload if needed.
-                // However, we log it heavily.
             }
 
             const newEmployee: Partial<FirestoreEmployee> = {

@@ -1784,6 +1784,23 @@ exports.getSecureDocumentURL = functions.https.onCall(async (request) => {
                     }
                 }
             }
+
+            // Check 4: Draft submissions — draft_submissions/{folderUid}
+            if (!isAuthorized) {
+                const draftDoc = await db.collection('draft_submissions').doc(folderUid).get();
+                if (draftDoc.exists) {
+                    const d = draftDoc.data();
+                    if (
+                        d.ownerUid === uid ||
+                        d.activeSessionUid === uid ||
+                        d.uid === uid ||
+                        d.linkedUid === uid ||
+                        (request.auth.token && request.auth.token.email && d.ownerEmail === request.auth.token.email)
+                    ) {
+                        isAuthorized = true;
+                    }
+                }
+            }
         } else if (storagePath.startsWith(`users/`)) {
             const pathParts = storagePath.split('/');
             const portalUserId = pathParts[1];
@@ -1883,6 +1900,33 @@ exports.moveStorageFolder = functions.https.onCall(async (request) => {
                 throw new functions.https.HttpsError('permission-denied', 'This staff account is disabled. Access denied.');
             }
             isAdminOrStaff = true;
+        }
+
+        if (!isAdminOrStaff) {
+            // Check custom claims
+            if (request.auth.token && (request.auth.token.isAdmin || request.auth.token.isSuperAdmin)) {
+                isAdminOrStaff = true;
+            } else {
+                // Check if user is moving their own file or has active correction token
+                const destParts = destinationPath.split('/');
+                const targetId = destParts[1]; // e.g. employees/{targetId}/joining/...
+                if (targetId && (targetId === uid || sourcePath.includes(uid))) {
+                    isAdminOrStaff = true;
+                } else if (targetId) {
+                    const empSnap = await db.collection('employees').doc(targetId).get();
+                    if (empSnap.exists) {
+                        const ed = empSnap.data();
+                        if (ed.linkedUid === uid || ed.uid === uid || ed.portalId === uid) {
+                            isAdminOrStaff = true;
+                        } else if (ed.activeCorrectionToken) {
+                            const crDoc = await db.collection('correction_requests').doc(ed.activeCorrectionToken).get();
+                            if (crDoc.exists && crDoc.data().status === 'pending') {
+                                isAdminOrStaff = true;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if (!isAdminOrStaff) {
@@ -2773,6 +2817,26 @@ exports.getUploadUrl = functions.https.onCall(async (request) => {
                         }
                     }
                 }
+
+                // Check 4: Data Correction Token
+                if (!isAuthorized) {
+                    const crDoc = await db.collection('correction_requests').doc(folderName).get();
+                    if (crDoc.exists && crDoc.data().status === 'pending') {
+                        isAuthorized = true;
+                    } else {
+                        const [subSnap, empSnap] = await Promise.all([
+                            db.collection('onboarding_submissions').doc(folderName).get(),
+                            db.collection('employees').doc(folderName).get()
+                        ]);
+                        const activeToken = (subSnap.exists && subSnap.data().activeCorrectionToken) || (empSnap.exists && empSnap.data().activeCorrectionToken);
+                        if (activeToken) {
+                            const tokenDoc = await db.collection('correction_requests').doc(activeToken).get();
+                            if (tokenDoc.exists && tokenDoc.data().status === 'pending') {
+                                isAuthorized = true;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -2784,15 +2848,32 @@ exports.getUploadUrl = functions.https.onCall(async (request) => {
 
             if (!employeeId) throw new functions.https.HttpsError('invalid-argument', 'Invalid employee path.');
 
-            if (employeeId === uid) {
+            // Allow if caller is Admin or SuperAdmin
+            if (request.auth.token && (request.auth.token.isAdmin || request.auth.token.isSuperAdmin)) {
+                isAuthorized = true;
+            } else if (employeeId === uid) {
                 isAuthorized = true;
             } else {
-                // Check employee record for linked UID
-                const empDoc = await db.collection('employees').doc(employeeId).get();
+                // Check employee record for linked UID by doc ID
+                let empDoc = await db.collection('employees').doc(employeeId).get();
+                if (!empDoc.exists) {
+                    const snap = await db.collection('employees').where('employeeId', '==', employeeId).limit(1).get();
+                    if (!snap.empty) {
+                        empDoc = snap.docs[0];
+                    } else {
+                        const snap2 = await db.collection('employees').where('portalId', '==', employeeId).limit(1).get();
+                        if (!snap2.empty) empDoc = snap2.docs[0];
+                    }
+                }
                 if (empDoc.exists) {
                     const e = empDoc.data();
-                    if (e.linkedUid === uid || e.uid === uid || e.ownerUid === uid || e.portalId === uid) {
+                    if (e.linkedUid === uid || e.uid === uid || e.ownerUid === uid || e.portalId === uid || e.employeeId === uid || empDoc.id === uid) {
                         isAuthorized = true;
+                    } else if (e.activeCorrectionToken) {
+                        const tokenDoc = await db.collection('correction_requests').doc(e.activeCorrectionToken).get();
+                        if (tokenDoc.exists && tokenDoc.data().status === 'pending') {
+                            isAuthorized = true;
+                        }
                     }
                 }
             }
@@ -2809,10 +2890,19 @@ exports.getUploadUrl = functions.https.onCall(async (request) => {
             if (employeeId === uid) {
                 isAuthorized = true;
             } else {
-                const empDoc = await db.collection('employees').doc(employeeId).get();
+                let empDoc = await db.collection('employees').doc(employeeId).get();
+                if (!empDoc.exists) {
+                    const snap = await db.collection('employees').where('employeeId', '==', employeeId).limit(1).get();
+                    if (!snap.empty) {
+                        empDoc = snap.docs[0];
+                    } else {
+                        const snap2 = await db.collection('employees').where('portalId', '==', employeeId).limit(1).get();
+                        if (!snap2.empty) empDoc = snap2.docs[0];
+                    }
+                }
                 if (empDoc.exists) {
                     const e = empDoc.data();
-                    if (e.linkedUid === uid || e.uid === uid || e.portalId === uid) {
+                    if (e.linkedUid === uid || e.uid === uid || e.portalId === uid || e.employeeId === uid || empDoc.id === uid) {
                         isAuthorized = true;
                     }
                 }
@@ -2822,15 +2912,20 @@ exports.getUploadUrl = functions.https.onCall(async (request) => {
         // ── CONTEXT: admin ────────────────────────────────────────────────────
         // Admin uploading documents (BGV certs, employee docs, public assets)
         else if (context === 'admin') {
-            // Check if caller is an active admin/staff
-            const [userSnap, staffAccSnap] = await Promise.all([
-                db.collection('users').doc(uid).get(),
-                db.collection('staff_accounts').doc(uid).get()
-            ]);
-
-            const adminDoc = staffAccSnap.exists ? staffAccSnap.data() : (userSnap.exists ? userSnap.data() : null);
-            if (adminDoc && adminDoc.isDisabled !== true && adminDoc.isActive !== false) {
+            // Check custom claims first (fastest)
+            if (request.auth.token && (request.auth.token.isAdmin || request.auth.token.isSuperAdmin)) {
                 isAuthorized = true;
+            } else {
+                // Check if caller is an active admin/staff in Firestore
+                const [userSnap, staffAccSnap] = await Promise.all([
+                    db.collection('users').doc(uid).get(),
+                    db.collection('staff_accounts').doc(uid).get()
+                ]);
+
+                const adminDoc = staffAccSnap.exists ? staffAccSnap.data() : (userSnap.exists ? userSnap.data() : null);
+                if (adminDoc && adminDoc.isDisabled !== true && adminDoc.isActive !== false) {
+                    isAuthorized = true;
+                }
             }
         }
 

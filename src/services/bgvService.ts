@@ -12,8 +12,7 @@ import {
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { BgvRecord, BgvStatus, FirestoreEmployee, Site, FormSection } from '../../types';
-import log from '../utils/logger';
-import { autoCompressFile } from './storageService';
+import { autoCompressFile, uploadFile } from './storageService';
 import { logSystemAction } from './auditService';
 
 const BGV_COLLECTION = 'bgv_records';
@@ -343,18 +342,15 @@ export const vendorSubmitBgvReport = async (
   file: File,
   vendorNotes?: string
 ) => {
-  const processedFile = await autoCompressFile(file);
-  const storagePath = `employees/${employeeId}/bgv/${Date.now()}_${processedFile.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-  const fileRef = ref(storage, storagePath);
-  await uploadBytes(fileRef, processedFile);
-  const downloadUrl = await getDownloadURL(fileRef);
+  const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const storagePath = await uploadFile(file, `employees/${employeeId}/bgv`, `${Date.now()}_${cleanName}`);
 
   const refDoc = doc(db, BGV_COLLECTION, recordId);
   const updates: Partial<BgvRecord> = {
     status: BgvStatus.VENDOR_SUBMITTED,
-    bgvDocumentUrl: downloadUrl,
+    bgvDocumentUrl: storagePath,
     bgvDocumentPath: storagePath,
-    bgvDocumentName: processedFile.name,
+    bgvDocumentName: file.name,
     vendorSubmittedDate: new Date().toISOString(),
     notes: (vendorNotes || '').trim(),
     updatedAt: new Date().toISOString()
@@ -396,18 +392,15 @@ export const staffDirectCompleteBgv = async (
   vendorCaseId?: string,
   notes?: string
 ) => {
-  const processedFile = await autoCompressFile(file);
-  const storagePath = `employees/${employeeId}/bgv/${Date.now()}_${processedFile.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-  const fileRef = ref(storage, storagePath);
-  await uploadBytes(fileRef, processedFile);
-  const downloadUrl = await getDownloadURL(fileRef);
+  const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const storagePath = await uploadFile(file, `employees/${employeeId}/bgv`, `${Date.now()}_${cleanName}`);
 
   const refDoc = doc(db, BGV_COLLECTION, recordId);
   const updates: Partial<BgvRecord> = {
     status: BgvStatus.COMPLETED,
-    bgvDocumentUrl: downloadUrl,
+    bgvDocumentUrl: storagePath,
     bgvDocumentPath: storagePath,
-    bgvDocumentName: processedFile.name,
+    bgvDocumentName: file.name,
     vendorName: vendorName ? vendorName.trim() : undefined,
     vendorCaseId: vendorCaseId ? vendorCaseId.trim() : undefined,
     approvedBy: staffName,

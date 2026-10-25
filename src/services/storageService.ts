@@ -71,7 +71,65 @@ export const autoCompressFile = async (file: File, options?: FileCompressionOpti
 };
 
 /**
+ * Uploads a file via a Cloud Function signed URL.
+ * The Cloud Function validates ownership and returns a signed URL.
+ * The file is then PUT to that URL directly — no storage rules involved.
+ */
+export const uploadViaSignedUrl = async (
+    context: 'onboarding' | 'employee' | 'admin' | 'profile',
+    storagePath: string,
+    file: File,
+    onProgress?: (percent: number) => void
+): Promise<string> => {
+    const getUploadUrlFn = httpsCallable<
+        { context: string; storagePath: string; contentType: string; fileSize: number },
+        { success: boolean; uploadUrl: string; storagePath: string }
+    >(functions, 'getUploadUrl');
+
+    const result = await getUploadUrlFn({
+        context,
+        storagePath,
+        contentType: file.type || 'application/octet-stream',
+        fileSize: file.size,
+    });
+
+    if (!result.data?.success || !result.data?.uploadUrl) {
+        throw new Error('Failed to get upload URL from server.');
+    }
+
+    const { uploadUrl } = result.data;
+
+    // Upload via fetch PUT to the signed URL (supports progress via XHR)
+    await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', uploadUrl, true);
+        xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+
+        if (onProgress) {
+            xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable) {
+                    onProgress(Math.round((e.loaded / e.total) * 100));
+                }
+            };
+        }
+
+        xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                resolve();
+            } else {
+                reject(new Error(`Upload failed: HTTP ${xhr.status}`));
+            }
+        };
+        xhr.onerror = () => reject(new Error('Upload network error.'));
+        xhr.send(file);
+    });
+
+    return storagePath;
+};
+
+/**
  * Basic file upload (no progress tracking).
+ * Uses Cloud Function signed URLs to bypass storage rules restrictions.
  */
 export const uploadFile = async (
     file: File,
@@ -82,11 +140,24 @@ export const uploadFile = async (
     try {
         const processedFile = await autoCompressFile(file, options);
         const finalName = fileName || `${Date.now()}_${processedFile.name}`;
-        const storageRef = ref(storage, `${path}/${finalName}`);
+        const cleanPath = path.replace(/\/+$/, '');
+        const storagePath = `${cleanPath}/${finalName}`;
 
-        const snapshot = await uploadBytes(storageRef, processedFile);
-        // Instead of returning public download URL, return the full storage path
-        return snapshot.ref.fullPath;
+        // Determine context for Cloud Function signed URL:
+        const context: 'onboarding' | 'employee' | 'admin' | 'profile' =
+            storagePath.startsWith('onboarding/') ? 'onboarding' :
+            storagePath.includes('/profile/') ? 'profile' :
+            (storagePath.startsWith('public/') || storagePath.includes('/bgv/') || storagePath.includes('/disciplinary/')) ? 'admin' :
+            'employee';
+
+        try {
+            return await uploadViaSignedUrl(context, storagePath, processedFile);
+        } catch (cfErr) {
+            console.warn('[STORAGE] Signed URL upload failed in uploadFile, attempting direct fallback:', cfErr);
+            const storageRef = ref(storage, storagePath);
+            const snapshot = await uploadBytes(storageRef, processedFile);
+            return snapshot.ref.fullPath;
+        }
     } catch (error) {
         console.error("Error uploading file:", error);
         throw error;
@@ -199,62 +270,6 @@ export const uploadDocumentWithProgress = async (
     });
 };
 
-/**
- * Uploads a file via a Cloud Function signed URL.
- * The Cloud Function validates ownership and returns a signed URL.
- * The file is then PUT to that URL directly — no storage rules involved.
- */
-const uploadViaSignedUrl = async (
-    context: 'onboarding' | 'employee' | 'admin' | 'profile',
-    storagePath: string,
-    file: File,
-    onProgress?: (percent: number) => void
-): Promise<string> => {
-    const getUploadUrlFn = httpsCallable<
-        { context: string; storagePath: string; contentType: string; fileSize: number },
-        { success: boolean; uploadUrl: string; storagePath: string }
-    >(functions, 'getUploadUrl');
-
-    const result = await getUploadUrlFn({
-        context,
-        storagePath,
-        contentType: file.type || 'application/octet-stream',
-        fileSize: file.size,
-    });
-
-    if (!result.data?.success || !result.data?.uploadUrl) {
-        throw new Error('Failed to get upload URL from server.');
-    }
-
-    const { uploadUrl } = result.data;
-
-    // Upload via fetch PUT to the signed URL (supports progress via XHR)
-    await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('PUT', uploadUrl, true);
-        xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
-
-        if (onProgress) {
-            xhr.upload.onprogress = (e) => {
-                if (e.lengthComputable) {
-                    onProgress(Math.round((e.loaded / e.total) * 100));
-                }
-            };
-        }
-
-        xhr.onload = () => {
-            if (xhr.status >= 200 && xhr.status < 300) {
-                resolve();
-            } else {
-                reject(new Error(`Upload failed: HTTP ${xhr.status}`));
-            }
-        };
-        xhr.onerror = () => reject(new Error('Upload network error.'));
-        xhr.send(file);
-    });
-
-    return storagePath;
-};
 
 /**
  * Upload a submission document with progress.
