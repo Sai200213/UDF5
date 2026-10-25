@@ -655,7 +655,7 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
         return <AdminRoleManagementPage roles={roles} setRoles={setRoles} staffUsers={staffUsers} setStaffUsers={setStaffUsers} onNotify={addToast} formSections={sections} logAction={logAction} />;
 
       case AppView.ADMIN_PORTAL_PORTAL_MODULES:
-        if (!hasPermission(Permission.MANAGE_WORKFLOWS)) return accessDenied;
+        if (!hasPermission(Permission.MANAGE_WORKFLOWS) && !hasPermission(Permission.MANAGE_SYSTEM)) return accessDenied;
         return <AdminWorkflowConfigPage
           workflowConfigs={workflowConfigs}
           setWorkflowConfigs={setWorkflowConfigs}
@@ -666,7 +666,7 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
           logAction={logAction}
         />;
       case AppView.ADMIN_PORTAL_CLIENT_ID_LIBRARY:
-        if (!hasPermission(Permission.MANAGE_WORKFLOWS)) return accessDenied;
+        if (!hasPermission(Permission.MANAGE_WORKFLOWS) && !hasPermission(Permission.MANAGE_SYSTEM) && !hasPermission(Permission.EMPLOYEES_MANAGE_CLIENT_IDS)) return accessDenied;
         return <AdminWorkflowConfigPage
           workflowConfigs={workflowConfigs}
           setWorkflowConfigs={setWorkflowConfigs}
@@ -693,6 +693,7 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
         return <AdminVacancyManager userRole={userRole} isSuperAdmin={isSuperAdmin} navigateTo={navigateTo} />;
 
       case AppView.ADMIN_PORTAL_INVITES:
+        if (!canSeeModule(Permission.INVITES_MANAGE, Permission.INVITES_VIEW, Permission.INVITES_VIEW_ALL)) return accessDenied;
         return (
           <AdminInvitesPage
             authUser={authUser}
@@ -735,6 +736,7 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
           />
         );
       case AppView.ADMIN_PORTAL_EMPLOYEE_TIMELINE:
+        if (!hasPermission(Permission.EMPLOYEES_VIEW_TIMELINE) && !hasPermission(Permission.EMPLOYEES_VIEW)) return accessDenied;
         const currentTimelineId = activeTimelineEmployeeId || timelineEmployeeId || (() => {
           try { return sessionStorage.getItem('activeTimelineEmployeeId'); } catch { return null; }
         })();
@@ -767,6 +769,7 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
           </div>
         );
       case AppView.ADMIN_PORTAL_BGV_MANAGEMENT:
+        if (!hasPermission(Permission.BGV_VIEW) && !hasPermission(Permission.BGV_MANAGE)) return accessDenied;
         return (
           <AdminBgvManagementPage
             authUser={authUser}
@@ -782,6 +785,7 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
           />
         );
       case AppView.ADMIN_LEGACY_SYSTEMS:
+        if (!isSuperAdmin && !hasPermission(Permission.MANAGE_SYSTEM) && !hasPermission(Permission.EMPLOYEES_IMPORT)) return accessDenied;
         return <AdminLegacySystemsPage logAction={logAction} />;
       case AppView.ADMIN_PORTAL_GRIEVANCES:
         if (!isSuperAdmin && !hasPermission(Permission.GRIEVANCES_VIEW) && !hasPermission(Permission.REWARDS_VIEW) && !hasPermission(Permission.REWARDS_MANAGE)) {
@@ -832,26 +836,6 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
 
   return (
     <div className={`h-screen flex bg-gray-100 relative overflow-hidden ${native ? 'native-app' : ''}`}>
-      {/* Toast Notifications overlay */}
-      <div className="fixed top-6 right-6 z-[9999] space-y-3 pointer-events-none max-w-sm w-full">
-        {localToasts.map(n => (
-          <div key={n.id} className={`pointer-events-auto p-4 rounded-lg shadow-2xl border flex items-start space-x-3 transition-all duration-300 transform translate-x-0 ${n.type === 'success' ? 'bg-green-50 border-green-200 text-green-800' :
-            n.type === 'error' ? 'bg-red-50 border-red-200 text-red-800' :
-              'bg-blue-50 border-blue-200 text-blue-800'
-            }`}>
-            <div className="flex-shrink-0 mt-0.5">
-              {n.type === 'success' ? <CheckCircle size={20} className="text-green-500" /> : <AlertCircle size={20} className={n.type === 'error' ? 'text-red-500' : 'text-blue-500'} />}
-            </div>
-            <div className="flex-1">
-              <p className="text-sm font-bold uppercase tracking-tight mb-0.5">{n.type}</p>
-              <p className="text-sm font-medium">{n.message}</p>
-            </div>
-            <button onClick={() => setLocalToasts(prev => prev.filter(x => x.id !== n.id))} className="flex-shrink-0 text-gray-400 hover:text-gray-600 transition-colors">
-              <X size={18} />
-            </button>
-          </div>
-        ))}
-      </div>
 
       {/* Mobile Overlay */}
       {isMobileMenuOpen && (

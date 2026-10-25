@@ -464,7 +464,7 @@ const App: React.FC = () => {
 
   // SMART NOTIFICATION HELPER
   const notifyApprovers = useCallback((employeeId: string, targetRoleId: string, message: string, link?: AppView) => {
-    const employeeForm = submittedForms.find(f => f.employeeId === employeeId);
+    const employeeForm = submittedForms.find(f => f.employeeId === employeeId || f.id === employeeId);
     if (!employeeForm || !employeeForm.data) {
       notifyRole(targetRoleId, message, 'info', link);
       return;

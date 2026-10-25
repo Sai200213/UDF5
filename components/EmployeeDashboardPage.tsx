@@ -131,6 +131,7 @@ const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = (props) => {
     }
 
     const items = [
+      { view: AppView.EMPLOYEE_DASHBOARD, label: 'Dashboard & Hub', icon: <Home size={20} />, visible: true },
       { view: AppView.EMPLOYEE_PROFILE, label: 'My Profile', icon: <UserCircle size={20} />, visible: true },
       { view: AppView.EMPLOYEE_LEAVE_REQUESTS, label: 'Leave Requests', icon: <CalendarDays size={20} />, visible: portalConfig?.enableLeaves ?? true },
       { view: AppView.EMPLOYEE_ACCOUNT_UPDATES, label: 'Account Updates', icon: <Edit3 size={20} />, visible: portalConfig?.enableAccountUpdates ?? true },
@@ -146,9 +147,6 @@ const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = (props) => {
         return AppView.DOCUMENT_UPLOAD;
       }
       return currentEmployeeView;
-    }
-    if (currentEmployeeView === AppView.EMPLOYEE_DASHBOARD) {
-      return AppView.EMPLOYEE_PROFILE;
     }
     return currentEmployeeView;
   }, [currentEmployeeView, employeeData]);
@@ -217,8 +215,10 @@ const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = (props) => {
           />
         );
         break;
+      case AppView.EMPLOYEE_DASHBOARD:
       default:
         content = <EmployeeEngagementHub authUser={authUser} employeeData={employeeData} />;
+        break;
     }
 
     return (

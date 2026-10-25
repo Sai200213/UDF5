@@ -129,7 +129,12 @@ const AdminGrievancesPage: React.FC<AdminGrievancesPageProps> = ({
         if (!canViewGrievances) return [];
         return complaints.filter(c => {
             if (!hasGrievanceScopeAll && allowedSiteIds && allowedSiteIds.length > 0) {
-                if (c.siteId && !allowedSiteIds.includes(c.siteId)) return false;
+                if (c.siteId) {
+                    if (!allowedSiteIds.includes(c.siteId)) return false;
+                } else {
+                    // Protect confidentiality: complaints with missing site are hidden from site-scoped admins
+                    return false;
+                }
             }
             const matchesSearch = 
                 (c.userName || '').toLowerCase().includes(complaintSearch.toLowerCase()) ||

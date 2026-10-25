@@ -93,7 +93,9 @@ const EmployeeEngagementHub: React.FC<EmployeeEngagementHubProps> = ({ authUser,
         setSubmittingComplaint(true);
         setComplaintStatus('idle');
         try {
-            const success = await submitComplaint(userId, userName, complaintText);
+            const empSiteId = employeeData?.currentSiteId || (employeeData as any)?.siteId || '';
+            const empSiteName = (employeeData as any)?.siteName || '';
+            const success = await submitComplaint(userId, userName, complaintText, 'normal', empSiteId, empSiteName);
             if (success) {
                 setComplaintStatus('success');
                 setComplaintText('');

@@ -47,6 +47,7 @@ export const subscribeToNotifications = (
         const q = query(
             collection(db, NOTIF_COL),
             where("targetUserId", "==", target),
+            orderBy("createdAt", "desc"),
             limit(50)
         );
 
@@ -101,7 +102,7 @@ export const markNotificationRead = async (notificationId: string) => {
 
 export const markAllRead = async (userId: string, currentNotifs: Notification[]) => {
     const batch = writeBatch(db);
-    const unread = currentNotifs.filter(n => !n.read && n.targetUserId === userId);
+    const unread = currentNotifs.filter(n => !n.read);
 
     if (unread.length === 0) return;
 

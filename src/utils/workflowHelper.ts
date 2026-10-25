@@ -30,8 +30,12 @@ export function isRoleAssignedToSite(
   return staffUsers.some(u => {
     if (u.roleId !== roleId || u.isDisabled) return false;
 
-    // Explicitly supervising or managing this site
-    if (site.supervisorId === u.id || (u.sitesManaged && u.sitesManaged.includes(site.id))) {
+    // Explicitly supervising or managing this site (checks single supervisor, multi-supervisors, or staff's sitesManaged)
+    if (
+      site.supervisorId === u.id || 
+      (Array.isArray((site as any).supervisorIds) && (site as any).supervisorIds.includes(u.id)) ||
+      (u.sitesManaged && u.sitesManaged.includes(site.id))
+    ) {
       return true;
     }
 

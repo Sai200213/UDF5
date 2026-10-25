@@ -284,20 +284,46 @@ export interface ComplaintItem {
     timestamp: any;
     status: 'pending' | 'in-review' | 'resolved' | 'dismissed';
     priority?: 'low' | 'normal' | 'high' | 'urgent';
+    siteId?: string;
+    siteName?: string;
     resolvedBy?: string;
     resolutionNotes?: string;
     resolvedAt?: any;
 }
 
-export const submitComplaint = async (userId: string, userName: string, text: string, priority: 'low' | 'normal' | 'high' | 'urgent' = 'normal'): Promise<boolean> => {
+export const submitComplaint = async (
+    userId: string, 
+    userName: string, 
+    text: string, 
+    priority: 'low' | 'normal' | 'high' | 'urgent' = 'normal',
+    siteId?: string,
+    siteName?: string
+): Promise<boolean> => {
     try {
+        let finalSiteId = siteId || '';
+        let finalSiteName = siteName || '';
+
+        // If site is not provided, look up from employee record
+        if (!finalSiteId && userId) {
+            try {
+                const { resolveEmployeeDoc } = await import('./employeeService');
+                const emp = await resolveEmployeeDoc(userId);
+                if (emp?.data) {
+                    finalSiteId = emp.data.currentSiteId || emp.data.siteId || '';
+                    finalSiteName = emp.data.siteName || '';
+                }
+            } catch (_) {}
+        }
+
         await addDoc(collection(db, 'complaints'), {
             userId,
             userName,
             text: text.trim(),
             timestamp: serverTimestamp(),
             status: 'pending',
-            priority
+            priority,
+            siteId: finalSiteId,
+            siteName: finalSiteName
         });
         log.log(`Complaint submitted by ${userName}`);
         return true;
