@@ -3772,16 +3772,17 @@ export const bulkSoftDeleteSubmissions = async (ids: string[]) => {
         submissions.push(...snap.docs.map(d => ({ id: d.id, ...d.data() } as OnboardingSubmission)));
     }
 
-    // 1.5 Fetch existing employee IDs to avoid "No document to update" errors
-    const employeeIdsToCheck = [...new Set(submissions
-        .map(s => s.employeeId)
-        .filter(id => id && !isPortalId(id)))] as string[];
+    // 1.5 Fetch existing employee IDs (including portal IDs and sub.id for self-onboarded employees)
+    const candidateEmpDocIds = [...new Set([
+        ...submissions.map(s => s.employeeId).filter(Boolean),
+        ...submissions.map(s => s.id).filter(Boolean)
+    ])] as string[];
 
     const existingEmployeeIds = new Set<string>();
-    if (employeeIdsToCheck.length > 0) {
+    if (candidateEmpDocIds.length > 0) {
         const empChunks = [];
-        for (let i = 0; i < employeeIdsToCheck.length; i += 30) {
-            empChunks.push(employeeIdsToCheck.slice(i, i + 30));
+        for (let i = 0; i < candidateEmpDocIds.length; i += 30) {
+            empChunks.push(candidateEmpDocIds.slice(i, i + 30));
         }
         for (const chunk of empChunks) {
             const q = query(collection(db, EMPLOYEES_COLLECTION), where("__name__", "in", chunk));
@@ -3811,9 +3812,13 @@ export const bulkSoftDeleteSubmissions = async (ids: string[]) => {
                 log.error(`Bulk Drive Move Error for ${sub.id}: `, err);
             });
 
-            // 3. If it's an approved employee, soft delete the employee record too (only if it exists)
-            if (sub.employeeId && sub.employeeId !== sub.id && !isPortalId(sub.employeeId) && existingEmployeeIds.has(sub.employeeId)) {
-                const empRef = doc(db, EMPLOYEES_COLLECTION, sub.employeeId);
+            // 3. If an associated employee record exists (either by sub.employeeId or sub.id), soft-delete it too
+            const matchedEmpDocId = (sub.employeeId && existingEmployeeIds.has(sub.employeeId))
+                ? sub.employeeId
+                : (existingEmployeeIds.has(sub.id) ? sub.id : null);
+
+            if (matchedEmpDocId) {
+                const empRef = doc(db, EMPLOYEES_COLLECTION, matchedEmpDocId);
                 batch.update(empRef, {
                     deletedAt: new Date().toISOString(),
                     isActive: false
@@ -3846,16 +3851,17 @@ export const bulkPermanentDeleteSubmissions = async (ids: string[]) => {
         submissions.push(...snap.docs.map(d => ({ id: d.id, ...d.data() } as OnboardingSubmission)));
     }
 
-    // 1.5 Fetch existing employee IDs for safety
-    const employeeIdsToCheck = [...new Set(submissions
-        .map(s => s.employeeId)
-        .filter(id => id && !isPortalId(id)))] as string[];
+    // 1.5 Fetch existing employee IDs for safety (including portal IDs and sub.id for self-onboarded employees)
+    const candidateEmpDocIds = [...new Set([
+        ...submissions.map(s => s.employeeId).filter(Boolean),
+        ...submissions.map(s => s.id).filter(Boolean)
+    ])] as string[];
 
     const existingEmployeeIds = new Set<string>();
-    if (employeeIdsToCheck.length > 0) {
+    if (candidateEmpDocIds.length > 0) {
         const empChunks = [];
-        for (let i = 0; i < employeeIdsToCheck.length; i += 30) {
-            empChunks.push(employeeIdsToCheck.slice(i, i + 30));
+        for (let i = 0; i < candidateEmpDocIds.length; i += 30) {
+            empChunks.push(candidateEmpDocIds.slice(i, i + 30));
         }
         for (const chunk of empChunks) {
             const q = query(collection(db, EMPLOYEES_COLLECTION), where("__name__", "in", chunk));
@@ -3893,13 +3899,18 @@ export const bulkPermanentDeleteSubmissions = async (ids: string[]) => {
                 log.error(`Bulk Storage Delete Error for ${sub.id}: `, err);
             }
 
-            // 2. Delete Employee Doc if exists
-            if (sub.employeeId && sub.employeeId !== sub.id && !isPortalId(sub.employeeId) && existingEmployeeIds.has(sub.employeeId)) {
-                const empRef = doc(db, EMPLOYEES_COLLECTION, sub.employeeId);
+            // 2. Delete Employee Doc if exists (checked by employeeId or sub.id)
+            const matchedEmpDocId = (sub.employeeId && existingEmployeeIds.has(sub.employeeId))
+                ? sub.employeeId
+                : (existingEmployeeIds.has(sub.id) ? sub.id : null);
+
+            if (matchedEmpDocId) {
+                const empRef = doc(db, EMPLOYEES_COLLECTION, matchedEmpDocId);
                 batch.delete(empRef);
                 // Cascading delete associated records (Note: this is async and not batchable easily)
-                deleteAssociatedRecords(sub.employeeId).catch(err => {
-                    log.error(`Bulk Cascade Delete Error for ${sub.employeeId}: `, err);
+                const targetId = sub.employeeId || matchedEmpDocId;
+                deleteAssociatedRecords(targetId).catch(err => {
+                    log.error(`Bulk Cascade Delete Error for ${targetId}: `, err);
                 });
             }
 

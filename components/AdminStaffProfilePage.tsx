@@ -94,7 +94,7 @@ const AdminStaffProfilePage: React.FC<AdminStaffProfilePageProps> = ({
               currentPhotoURL={authUser?.profilePhotoURL}
               size={80}
               editable={true}
-              collection="staffUsers"
+              collection="staff_accounts"
             />
           </div>
         </div>

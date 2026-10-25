@@ -169,13 +169,15 @@ service cloud.firestore {
     match /staff_accounts/{userId} {
       allow get: if isAuthenticated() && (request.auth.uid == userId || isAdmin() || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', '')));
       allow list: if isAdmin() || (isAuthenticated() && request.auth.token.get('email', '') != '');
-      allow write: if isSuperAdmin();
+      allow update: if isSuperAdmin() || (isAuthenticated() && (request.auth.uid == userId || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', ''))) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['profilePhotoURL', 'updatedAt', 'lastUpdated']));
+      allow create, delete: if isSuperAdmin();
     }
 
     match /staff/{userId} {
       allow get: if isAuthenticated() && (request.auth.uid == userId || isAdmin() || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', '')));
       allow list: if isAdmin() || (isAuthenticated() && request.auth.token.get('email', '') != '');
-      allow write: if isSuperAdmin();
+      allow update: if isSuperAdmin() || (isAuthenticated() && (request.auth.uid == userId || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', ''))) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['profilePhotoURL', 'updatedAt', 'lastUpdated']));
+      allow create, delete: if isSuperAdmin();
     }
 
     // ─── Employee Records ────────────────────────────────────────────────────

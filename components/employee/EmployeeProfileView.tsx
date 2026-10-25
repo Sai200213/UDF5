@@ -285,7 +285,7 @@ const EmployeeProfileView: React.FC<EmployeeProfileViewProps> = ({
         <div className="px-6 md:px-10 pb-8 flex flex-col md:flex-row gap-6 -mt-16 md:-mt-20 relative z-10">
           <div className="ring-4 ring-white rounded-full bg-white self-start flex-shrink-0">
             <ProfileAvatar
-              userId={employeeData.employeeId || employeeData.id}
+              userId={employeeData.id || (employeeData as any).portalId || employeeData.employeeId}
               userName={employeeData.applicantName || employeeData.employeeId || 'Employee'}
               currentPhotoURL={employeeData.profilePhotoURL}
               size={120}

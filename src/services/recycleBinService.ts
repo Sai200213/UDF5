@@ -5,6 +5,7 @@ import {
 import { db } from '../firebase/config';
 import { SETTINGS_COLLECTION } from './adminService';
 import { Site } from '../../types';
+import { resolveEmployeeDoc } from './employeeService';
 
 export type RecycleBinItemType = 'SITE' | 'STAFF' | 'EMPLOYEE' | 'SUBMISSION' | 'INVITE' | 'ROLE' | 'VACANCY' | 'DESIGNATION';
 
@@ -128,15 +129,26 @@ export async function restoreFromRecycleBin(recycleBinItemId: string): Promise<{
           ...data,
           isDisabled: false,
           isDeleted: false,
+          deletedAt: null,
           restoredAt: new Date().toISOString()
         }, { merge: true });
+
+        // Re-enable Firebase Auth user account
+        try {
+          const { setStaffUserStatus } = await import('./staffService');
+          await setStaffUserStatus(originalId, false);
+        } catch (authErr) {
+          console.warn('Could not re-enable Firebase Auth for restored staff:', authErr);
+        }
         break;
       }
 
       case 'EMPLOYEE': {
-        // Restore employee record
-        const empRef = doc(db, 'employees', originalId);
+        // Restore employee record with active status and clear deletedAt
+        const resolved = await resolveEmployeeDoc(originalId);
+        const empRef = resolved?.ref || doc(db, 'employees', originalId);
         await updateDoc(empRef, {
+          isActive: true,
           isDeleted: false,
           deletedAt: null,
           status: 'Active',
@@ -146,12 +158,14 @@ export async function restoreFromRecycleBin(recycleBinItemId: string): Promise<{
       }
 
       case 'SUBMISSION': {
-        // Restore onboarding submission
+        // Restore onboarding submission and clear deletedAt so 30-day auto purge does not re-purge
         const subRef = doc(db, 'onboarding_submissions', originalId);
         await setDoc(subRef, {
           ...data,
+          isActive: true,
           isDeleted: false,
-          status: data.status || 'Pending Review',
+          deletedAt: null,
+          status: data.status === 'Deleted' ? 'Pending' : (data.status || 'Pending'),
           restoredAt: new Date().toISOString()
         }, { merge: true });
         break;
@@ -254,6 +268,18 @@ export async function restoreFromRecycleBin(recycleBinItemId: string): Promise<{
  */
 export async function permanentDeleteFromRecycleBin(recycleBinItemId: string): Promise<void> {
   const binDocRef = doc(db, RECYCLE_BIN_COLLECTION, recycleBinItemId);
+  const snap = await getDoc(binDocRef);
+  if (snap.exists()) {
+    const binData = snap.data();
+    if (binData.itemType === 'STAFF' && binData.originalId) {
+      try {
+        const { deleteStaffUser } = await import('./staffService');
+        await deleteStaffUser(binData.originalId);
+      } catch (authErr) {
+        console.warn('Could not delete Firebase Auth user during permanent purge:', authErr);
+      }
+    }
+  }
   await deleteDoc(binDocRef);
 }
 

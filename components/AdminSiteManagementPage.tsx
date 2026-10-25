@@ -466,20 +466,26 @@ const AdminSiteManagementPage: React.FC<AdminSiteManagementPageProps> = ({ sites
       // 3. Check pending onboarding submissions
       const subQ1 = query(
         collection(db, 'onboarding_submissions'),
-        where('status', '==', 'Pending Review'),
         where('siteId', '==', siteToDelete.id)
       );
       const subSnap1 = await getDocs(subQ1);
+      const pendingSub1 = subSnap1.docs.filter(d => {
+        const s = d.data().status;
+        return (s === 'Pending' || s === 'Pending Review') && !d.data().deletedAt && !d.data().isDeleted;
+      });
 
       const subQ2 = query(
         collection(db, 'onboarding_submissions'),
-        where('status', '==', 'Pending Review'),
         where('formData.52ae217b-2602-4337-a1cd-a1f9bd36a4b0', '==', siteToDelete.name)
       );
       const subSnap2 = await getDocs(subQ2);
+      const pendingSub2 = subSnap2.docs.filter(d => {
+        const s = d.data().status;
+        return (s === 'Pending' || s === 'Pending Review') && !d.data().deletedAt && !d.data().isDeleted && !subSnap1.docs.some(d1 => d1.id === d.id);
+      });
 
-      if (!subSnap1.empty || !subSnap2.empty) {
-        const total = subSnap1.size + subSnap2.size;
+      const total = pendingSub1.length + pendingSub2.length;
+      if (total > 0) {
         onNotify(`Cannot delete "${siteToDelete.name}" because it is linked to ${total} pending onboarding application(s). Resolve or reject these submissions first.`, 'error');
         setIsDeleteConfirmOpen(false);
         setIsDeletingSite(false);

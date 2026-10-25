@@ -599,14 +599,14 @@ const AdminStaffManagementPage: React.FC<AdminStaffManagementPageProps> = ({
         }
       }
 
-      // 3. Mark account as deleted/disabled in staffService
+      // 3. Disable account in staffService (preserve Auth account for Recycle Bin retention/restore)
       try {
-        await deleteStaffUser(staffToDelete);
+        await setStaffUserStatus(staffToDelete, true);
       } catch (cfErr: any) {
-        console.warn("deleteStaffUser Cloud Function warning:", cfErr);
+        console.warn("setStaffUserStatus Cloud Function warning:", cfErr);
       }
 
-      // Always guarantee Firestore cleanup in case user was mock or missing from Firebase Auth
+      // Clean up active staff_accounts document so they don't appear in active staff list
       await deleteDoc(doc(db, 'staff_accounts', staffToDelete)).catch(() => {});
       await deleteDoc(doc(db, 'users', staffToDelete)).catch(() => {});
 
@@ -624,6 +624,7 @@ const AdminStaffManagementPage: React.FC<AdminStaffManagementPageProps> = ({
         onUndo: () => {
           if (deletedStaffCopy) {
             setStaffUsers(prev => [...prev.filter(s => s.id !== deletedStaffCopy.id), deletedStaffCopy]);
+            setStaffUserStatus(staffToDelete, false).catch(err => console.warn('Failed to re-enable staff Auth on undo:', err));
           }
         }
       });

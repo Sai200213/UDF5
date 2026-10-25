@@ -82,9 +82,19 @@ const ProfileAvatar: React.FC<ProfileAvatarProps> = ({
             setPhotoURL(downloadURL);
 
             // Update Firestore
-            await updateDoc(doc(db, collection, userId), {
-                profilePhotoURL: downloadURL
-            });
+            const targetCollection = collection === 'staffUsers' ? 'staff_accounts' : collection;
+            if (targetCollection === 'employees') {
+                const { resolveEmployeeDoc } = await import('../src/services/employeeService');
+                const resolved = await resolveEmployeeDoc(userId);
+                const targetRef = resolved?.ref || doc(db, 'employees', userId);
+                await updateDoc(targetRef, {
+                    profilePhotoURL: downloadURL
+                });
+            } else {
+                await updateDoc(doc(db, targetCollection, userId), {
+                    profilePhotoURL: downloadURL
+                });
+            }
 
             onPhotoUpdated?.(downloadURL);
         } catch (error) {
