@@ -1,6 +1,7 @@
 const functions = require('firebase-functions'); // firebase-functions v7 = gen2 API
 const admin = require('firebase-admin');
 const bcrypt = require('bcryptjs');
+const { onDocumentWritten } = require('firebase-functions/v2/firestore');
 
 admin.initializeApp();
 
@@ -1899,6 +1900,165 @@ exports.getSecureDocumentURL = functions.https.onCall(async (request) => {
 });
 
 /**
+ * getBatchSignedViewUrls (CLOUD-8)
+ * Generates signed URLs for up to 30 storage paths in a single round-trip.
+ * Validates ownership once per prefix / target ID instead of 10-15 parallel calls.
+ */
+exports.getBatchSignedViewUrls = functions.https.onCall(async (request) => {
+    if (!request.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'You must be logged in to access secure documents.');
+    }
+
+    const { storagePaths } = request.data || {};
+    if (!Array.isArray(storagePaths) || storagePaths.length === 0) {
+        return { success: true, urls: {} };
+    }
+
+    // Limit batch size to 30 paths to prevent abuse
+    const pathsToProcess = storagePaths.slice(0, 30);
+    const db = admin.firestore();
+    const uid = request.auth.uid;
+
+    try {
+        // 1. Check if caller is Admin or Staff
+        let isAdminOrStaff = false;
+        if (request.auth.token && (request.auth.token.isAdmin === true || request.auth.token.isSuperAdmin === true)) {
+            isAdminOrStaff = true;
+        } else {
+            const [userSnap, staffSnap, staffAccSnap] = await Promise.all([
+                db.collection('users').doc(uid).get(),
+                db.collection('staff').doc(uid).get(),
+                db.collection('staff_accounts').doc(uid).get()
+            ]);
+            const staffDoc = (staffAccSnap.exists ? staffAccSnap.data() : (staffSnap.exists ? staffSnap.data() : (userSnap.exists ? userSnap.data() : null)));
+            if (staffDoc && staffDoc.isDisabled !== true && staffDoc.isActive !== false && staffDoc.status !== 'relieved' && staffDoc.status !== 'terminated') {
+                isAdminOrStaff = true;
+            } else if (request.auth.token && request.auth.token.email && request.auth.token.email_verified) {
+                const email = request.auth.token.email;
+                const [usersByEmail, staffByEmail, staffAccByEmail] = await Promise.all([
+                    db.collection('users').where('email', '==', email).limit(1).get(),
+                    db.collection('staff').where('email', '==', email).limit(1).get(),
+                    db.collection('staff_accounts').where('email', '==', email).limit(1).get()
+                ]);
+                const matchedDoc = (!staffAccByEmail.empty ? staffAccByEmail.docs[0] : (!staffByEmail.empty ? staffByEmail.docs[0] : (!usersByEmail.empty ? usersByEmail.docs[0] : null)));
+                if (matchedDoc) {
+                    const sData = matchedDoc.data();
+                    if (sData.isDisabled !== true && sData.isActive !== false && sData.status !== 'relieved' && sData.status !== 'terminated') {
+                        isAdminOrStaff = true;
+                    }
+                }
+            }
+        }
+
+        // Cache authorization decisions per target ID / folder to avoid repeated Firestore lookups
+        const authCache = new Map();
+
+        const checkPathAuthorization = async (p) => {
+            if (isAdminOrStaff) return true;
+            if (typeof p !== 'string') return false;
+            const cleanPath = p.trim().replace(/^\/+/, '');
+            if (cleanPath.startsWith('public/')) return true;
+
+            const parts = cleanPath.split('/');
+            const root = parts[0];
+            const targetId = parts[1];
+
+            if (!root || !targetId) return false;
+            const cacheKey = `${root}:${targetId}`;
+            if (authCache.has(cacheKey)) return authCache.get(cacheKey);
+
+            let authorized = false;
+            if (root === 'employees') {
+                if (targetId === uid) {
+                    authorized = true;
+                } else {
+                    let empDoc = await db.collection('employees').doc(targetId).get();
+                    let empData = empDoc.exists ? empDoc.data() : null;
+                    if (!empData) {
+                        const snap = await db.collection('employees').where('employeeId', '==', targetId).limit(1).get();
+                        if (!snap.empty) empData = snap.docs[0].data();
+                    }
+                    if (!empData) {
+                        const subDoc = await db.collection('onboarding_submissions').doc(targetId).get();
+                        if (subDoc.exists) empData = subDoc.data();
+                        else {
+                            const subSnap = await db.collection('onboarding_submissions').where('employeeId', '==', targetId).limit(1).get();
+                            if (!subSnap.empty) empData = subSnap.docs[0].data();
+                        }
+                    }
+                    if (empData) {
+                        if (
+                            empData.linkedUid === uid ||
+                            empData.uid === uid ||
+                            empData.employeeId === uid ||
+                            empData.portalId === uid
+                        ) {
+                            authorized = true;
+                        }
+                    }
+                }
+            } else if (root === 'onboarding') {
+                if (targetId === uid) {
+                    authorized = true;
+                } else {
+                    const subDoc = await db.collection('onboarding_submissions').doc(targetId).get();
+                    if (subDoc.exists && (subDoc.data().linkedUid === uid || subDoc.data().uid === uid || subDoc.data().employeeId === uid)) {
+                        authorized = true;
+                    } else {
+                        const draftDoc = await db.collection('draft_submissions').doc(targetId).get();
+                        if (draftDoc.exists) {
+                            const d = draftDoc.data();
+                            if (d.ownerUid === uid || d.activeSessionUid === uid || d.uid === uid || d.linkedUid === uid || (request.auth.token && request.auth.token.email && d.ownerEmail === request.auth.token.email)) {
+                                authorized = true;
+                            }
+                        }
+                    }
+                }
+            } else if (root === 'users') {
+                if (targetId === uid) authorized = true;
+            }
+
+            authCache.set(cacheKey, authorized);
+            return authorized;
+        };
+
+        const bucket = admin.storage().bucket();
+        const urls = {};
+        const expiresAt = Date.now() + 30 * 60 * 1000; // 30 minutes
+
+        await Promise.all(pathsToProcess.map(async (p) => {
+            if (!p || typeof p !== 'string') return;
+            const cleanPath = p.trim().replace(/^\/+/, '');
+            // Prevent path traversal
+            if (cleanPath.includes('..')) return;
+
+            const isAuth = await checkPathAuthorization(cleanPath);
+            if (!isAuth) return;
+
+            try {
+                const file = bucket.file(cleanPath);
+                const [exists] = await file.exists();
+                if (!exists) return;
+
+                const [signedUrl] = await file.getSignedUrl({
+                    action: 'read',
+                    expires: expiresAt
+                });
+                urls[p] = signedUrl;
+            } catch (fileErr) {
+                console.warn(`[getBatchSignedViewUrls] Could not sign path ${cleanPath}:`, fileErr.message);
+            }
+        }));
+
+        return { success: true, urls };
+    } catch (error) {
+        console.error('[getBatchSignedViewUrls] Error:', error);
+        if (error instanceof functions.https.HttpsError) throw error;
+        throw new functions.https.HttpsError('internal', 'Failed to generate batch signed URLs.');
+    }
+});
+
+/**
  * Moves a folder and its contents in Firebase Storage.
  * Used during onboarding approval to move files from temporary to permanent location.
  */
@@ -3214,31 +3374,24 @@ exports.getUploadUrl = functions.https.onCall(async (request) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * setAdminClaims
- * Called after any staff/admin login. Fetches the user's role and permissions
- * from Firestore and stamps them as custom claims on their Firebase Auth token.
- * After this call the client must force-refresh the token: auth.currentUser.getIdToken(true)
+ * computeAndApplyUserClaims (Shared helper for setAdminClaims, refreshAdminClaims & triggers)
+ * Resolves permissions, roles, and site scopes, then stamps Firebase custom claims.
  */
-exports.setAdminClaims = functions.https.onCall(async (request) => {
-    if (!request.auth) {
-        throw new functions.https.HttpsError('unauthenticated', 'Must be authenticated.');
-    }
-
-    const uid = request.auth.uid;
+const computeAndApplyUserClaims = async (uid, resolvedDocId = null, explicitDoc = null) => {
     const db = admin.firestore();
+    let doc = explicitDoc;
+    let userDoc = null;
+    let finalDocId = resolvedDocId || uid;
 
-    try {
-        // Look up the user in staff_accounts, users, and legacy staff by UID first, then by email fallback
+    if (!doc) {
         const [staffAccSnap, userSnap, legacyStaffSnap] = await Promise.all([
             db.collection('staff_accounts').doc(uid).get(),
             db.collection('users').doc(uid).get(),
             db.collection('staff').doc(uid).get()
         ]);
-
-        let resolvedDocId = uid;
-        let staffDoc = staffAccSnap.exists ? staffAccSnap.data() : (legacyStaffSnap.exists ? legacyStaffSnap.data() : null);
-        let userDoc = userSnap.exists ? userSnap.data() : null;
-        let doc = staffDoc || userDoc;
+        const staffDoc = staffAccSnap.exists ? staffAccSnap.data() : (legacyStaffSnap.exists ? legacyStaffSnap.data() : null);
+        userDoc = userSnap.exists ? userSnap.data() : null;
+        doc = staffDoc || userDoc;
 
         if (!doc) {
             const authUser = await admin.auth().getUser(uid).catch(() => null);
@@ -3247,81 +3400,90 @@ exports.setAdminClaims = functions.https.onCall(async (request) => {
                 for (const colName of ['staff_accounts', 'users', 'staff']) {
                     const qSnap = await db.collection(colName).where('email', '==', email).limit(1).get();
                     if (!qSnap.empty) {
-                        resolvedDocId = qSnap.docs[0].id;
+                        finalDocId = qSnap.docs[0].id;
                         doc = qSnap.docs[0].data();
                         if (colName === 'users') userDoc = doc;
-                        else staffDoc = doc;
                         break;
                     }
                 }
             }
         }
+    }
 
-        if (!doc) {
-            // Not an admin — clear any stale claims
-            await admin.auth().setCustomUserClaims(uid, {});
-            return { success: true, isAdmin: false };
-        }
+    if (!doc) {
+        await admin.auth().setCustomUserClaims(uid, {});
+        return { success: true, isAdmin: false };
+    }
 
-        // Check account is not disabled
-        if (doc.isDisabled === true || doc.isActive === false) {
-            await admin.auth().setCustomUserClaims(uid, {});
-            throw new functions.https.HttpsError('permission-denied', 'Account is disabled.');
-        }
+    if (doc.isDisabled === true || doc.isActive === false) {
+        await admin.auth().setCustomUserClaims(uid, {});
+        return { success: true, isAdmin: false, isDisabled: true };
+    }
 
-        const roleId = doc.roleId || 'none';
-        const isSuperAdmin = roleId === 'role-super-admin' || !!userDoc;
+    const roleId = doc.roleId || 'none';
+    const isSuperAdmin = roleId === 'role-super-admin' || !!userDoc || doc.type === 'Admin' || (doc.roles && doc.roles.includes('super-admin'));
 
-        // Resolve all sites managed (from staff doc and settings/sites supervisor assignments)
-        const sitesManagedSet = new Set(Array.isArray(doc.sitesManaged) ? doc.sitesManaged.filter(Boolean) : []);
-        try {
-            const sitesSnap = await db.collection('settings').doc('sites').get();
-            if (sitesSnap.exists) {
-                const data = sitesSnap.data() || {};
-                const list = Array.isArray(data.sites) ? data.sites : (Array.isArray(data.sitesList) ? data.sitesList : []);
-                const adminIdentifiers = new Set([uid, resolvedDocId, doc.id, doc.username, doc.employeeId].filter(Boolean));
-                for (const s of list) {
-                    if (!s || !s.id) continue;
-                    const supIds = Array.isArray(s.supervisorIds) ? s.supervisorIds : [];
-                    if (adminIdentifiers.has(s.supervisorId) || supIds.some(id => adminIdentifiers.has(id))) {
-                        sitesManagedSet.add(s.id);
-                    }
+    // Resolve all sites managed
+    const sitesManagedSet = new Set(Array.isArray(doc.sitesManaged) ? doc.sitesManaged.filter(Boolean) : []);
+    try {
+        const sitesSnap = await db.collection('settings').doc('sites').get();
+        if (sitesSnap.exists) {
+            const data = sitesSnap.data() || {};
+            const list = Array.isArray(data.sites) ? data.sites : (Array.isArray(data.sitesList) ? data.sitesList : []);
+            const adminIdentifiers = new Set([uid, finalDocId, doc.id, doc.username, doc.employeeId].filter(Boolean));
+            for (const s of list) {
+                if (!s || !s.id) continue;
+                const supIds = Array.isArray(s.supervisorIds) ? s.supervisorIds : [];
+                if (adminIdentifiers.has(s.supervisorId) || supIds.some(id => adminIdentifiers.has(id))) {
+                    sitesManagedSet.add(s.id);
                 }
             }
-        } catch (sitesErr) {
-            console.warn('[setAdminClaims] Error reading settings/sites:', sitesErr);
         }
-        const sitesManaged = Array.from(sitesManagedSet);
+    } catch (sitesErr) {
+        console.warn('[computeAndApplyUserClaims] Error reading settings/sites:', sitesErr);
+    }
+    const sitesManaged = Array.from(sitesManagedSet);
 
-        // Fetch permissions from the roles collection
-        let permissions = [];
-        const permissionOverrides = doc.permissionOverrides || {};
-        if (roleId && roleId !== 'none') {
-            const roleSnap = await db.collection('roles').doc(roleId).get();
-            if (roleSnap.exists && roleSnap.data().isDisabled !== true) {
-                permissions = roleSnap.data().permissions || [];
-            }
+    // Fetch permissions from the roles collection
+    let permissions = [];
+    const permissionOverrides = doc.permissionOverrides || {};
+    if (roleId && roleId !== 'none') {
+        const roleSnap = await db.collection('roles').doc(roleId).get();
+        if (roleSnap.exists && roleSnap.data().isDisabled !== true) {
+            permissions = roleSnap.data().permissions || [];
         }
+    }
 
-        // Build final permissions list: base role permissions + overrides
-        const finalPermissions = [...new Set([
-            ...permissions.filter(p => permissionOverrides[p] !== false),
-            ...Object.keys(permissionOverrides).filter(p => permissionOverrides[p] === true)
-        ])];
+    const finalPermissions = [...new Set([
+        ...permissions.filter(p => permissionOverrides[p] !== false),
+        ...Object.keys(permissionOverrides).filter(p => permissionOverrides[p] === true)
+    ])];
 
-        const claims = {
-            isAdmin: true,
-            isSuperAdmin,
-            roleId,
-            sitesManaged,
-            permissions: finalPermissions
-        };
+    const claims = {
+        isAdmin: true,
+        isSuperAdmin,
+        roleId,
+        sitesManaged,
+        permissions: finalPermissions
+    };
 
-        await admin.auth().setCustomUserClaims(uid, claims);
-        console.log(`[AUTH CLAIMS] Set claims for uid=${uid}, role=${roleId}, isSuperAdmin=${isSuperAdmin}`);
+    await admin.auth().setCustomUserClaims(uid, claims);
+    console.log(`[AUTH CLAIMS] Stamped claims for uid=${uid}, role=${roleId}, isSuperAdmin=${isSuperAdmin}`);
+    return { success: true, isAdmin: true, isSuperAdmin, roleId, sitesManaged, permissions: finalPermissions };
+};
 
-        return { success: true, isAdmin: true, isSuperAdmin, roleId };
-
+/**
+ * setAdminClaims
+ * Called after any staff/admin login. Fetches user permissions and stamps them as custom claims.
+ */
+exports.setAdminClaims = functions.https.onCall(async (request) => {
+    if (!request.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Must be authenticated.');
+    }
+    const uid = request.auth.uid;
+    try {
+        const res = await computeAndApplyUserClaims(uid);
+        return res;
     } catch (error) {
         if (error instanceof functions.https.HttpsError) throw error;
         console.error('[setAdminClaims] Error:', error);
@@ -3329,12 +3491,9 @@ exports.setAdminClaims = functions.https.onCall(async (request) => {
     }
 });
 
-
 /**
  * refreshAdminClaims
  * Called by SuperAdmin after changing another staff member's role or permissions.
- * Forces the target user's claims to be refreshed immediately.
- * Only SuperAdmins can refresh another user's claims.
  */
 exports.refreshAdminClaims = functions.https.onCall(async (request) => {
     if (!request.auth) {
@@ -3342,87 +3501,173 @@ exports.refreshAdminClaims = functions.https.onCall(async (request) => {
     }
 
     const callerUid = request.auth.uid;
-    const { targetUid } = request.data;
+    const { targetUid } = request.data || {};
 
     if (!targetUid) {
         throw new functions.https.HttpsError('invalid-argument', 'targetUid is required.');
     }
 
-    const db = admin.firestore();
-
-    // Only allow SuperAdmins to refresh other users' claims
-    const isSuperAdmin = request.auth.token.isSuperAdmin === true;
+    const isSuperAdmin = request.auth.token && request.auth.token.isSuperAdmin === true;
     if (!isSuperAdmin && callerUid !== targetUid) {
-        // Allow self-refresh always (staff refreshing their own token)
         throw new functions.https.HttpsError('permission-denied', 'Only SuperAdmins can refresh another user\'s claims.');
     }
 
     try {
-        const [staffAccSnap, userSnap] = await Promise.all([
-            db.collection('staff_accounts').doc(targetUid).get(),
-            db.collection('users').doc(targetUid).get()
-        ]);
-
-        const staffDoc = staffAccSnap.exists ? staffAccSnap.data() : null;
-        const userDoc = userSnap.exists ? userSnap.data() : null;
-        const doc = staffDoc || userDoc;
-
-        if (!doc || doc.isDisabled === true || doc.isActive === false) {
-            await admin.auth().setCustomUserClaims(targetUid, {});
-            return { success: true, cleared: true };
-        }
-
-        const roleId = doc.roleId || 'none';
-        const isTargetSuperAdmin = roleId === 'role-super-admin' || !!userDoc;
-        const permissionOverrides = doc.permissionOverrides || {};
-
-        // Resolve all sites managed (from staff doc and settings/sites supervisor assignments)
-        const sitesManagedSet = new Set(Array.isArray(doc.sitesManaged) ? doc.sitesManaged.filter(Boolean) : []);
-        try {
-            const sitesSnap = await db.collection('settings').doc('sites').get();
-            if (sitesSnap.exists) {
-                const data = sitesSnap.data() || {};
-                const list = Array.isArray(data.sites) ? data.sites : (Array.isArray(data.sitesList) ? data.sitesList : []);
-                for (const s of list) {
-                    if (!s || !s.id) continue;
-                    if (s.supervisorId === targetUid || (Array.isArray(s.supervisorIds) && s.supervisorIds.includes(targetUid))) {
-                        sitesManagedSet.add(s.id);
-                    }
-                }
-            }
-        } catch (sitesErr) {
-            console.warn('[refreshAdminClaims] Error reading settings/sites:', sitesErr);
-        }
-        const sitesManaged = Array.from(sitesManagedSet);
-
-        let permissions = [];
-        if (roleId && roleId !== 'none') {
-            const roleSnap = await db.collection('roles').doc(roleId).get();
-            if (roleSnap.exists && roleSnap.data().isDisabled !== true) {
-                permissions = roleSnap.data().permissions || [];
-            }
-        }
-
-        const finalPermissions = [...new Set([
-            ...permissions.filter(p => permissionOverrides[p] !== false),
-            ...Object.keys(permissionOverrides).filter(p => permissionOverrides[p] === true)
-        ])];
-
-        await admin.auth().setCustomUserClaims(targetUid, {
-            isAdmin: true,
-            isSuperAdmin: isTargetSuperAdmin,
-            roleId,
-            sitesManaged,
-            permissions: finalPermissions
-        });
-
-        console.log(`[AUTH CLAIMS] Refreshed claims for uid=${targetUid} by uid=${callerUid}`);
-        return { success: true, cleared: false };
-
+        const res = await computeAndApplyUserClaims(targetUid);
+        return { success: true, ...res };
     } catch (error) {
         if (error instanceof functions.https.HttpsError) throw error;
         console.error('[refreshAdminClaims] Error:', error);
         throw new functions.https.HttpsError('internal', 'Failed to refresh claims.');
+    }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLOUD-3: AUTOMATIC CUSTOM CLAIMS REAL-TIME SYNC TRIGGERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * onRoleWritten
+ * Triggered whenever a role in /roles/{roleId} is created, updated, or deleted.
+ * Automatically recalculates and stamps custom claims for all staff accounts with this role.
+ */
+exports.onRoleWritten = onDocumentWritten("roles/{roleId}", async (event) => {
+    const roleId = event.params.roleId;
+    const db = admin.firestore();
+    console.log(`[TRIGGER: onRoleWritten] Role ${roleId} changed, recomputing claims for affected staff...`);
+
+    try {
+        const [staffAccSnap, legacyStaffSnap] = await Promise.all([
+            db.collection('staff_accounts').where('roleId', '==', roleId).get(),
+            db.collection('staff').where('roleId', '==', roleId).get()
+        ]);
+
+        const processedUids = new Set();
+        const updates = [];
+
+        const handleStaffDoc = async (docSnap) => {
+            const data = docSnap.data();
+            let authUid = data.uid || docSnap.id;
+            let authUser = await admin.auth().getUser(authUid).catch(() => null);
+            if (!authUser && data.email) {
+                authUser = await admin.auth().getUserByEmail(data.email).catch(() => null);
+                if (authUser) authUid = authUser.uid;
+            }
+            if (authUser && !processedUids.has(authUid)) {
+                processedUids.add(authUid);
+                await computeAndApplyUserClaims(authUid, docSnap.id, data);
+                updates.push(docSnap.ref.update({
+                    claimsUpdatedAt: admin.firestore.FieldValue.serverTimestamp()
+                }));
+            }
+        };
+
+        for (const d of staffAccSnap.docs) await handleStaffDoc(d);
+        for (const d of legacyStaffSnap.docs) await handleStaffDoc(d);
+
+        await Promise.all(updates);
+        console.log(`[TRIGGER: onRoleWritten] Successfully refreshed claims for ${processedUids.size} staff members.`);
+    } catch (err) {
+        console.error('[TRIGGER: onRoleWritten] Error:', err);
+    }
+});
+
+/**
+ * onStaffAccountWritten
+ * Triggered whenever a staff profile in /staff_accounts/{staffId} is updated or deleted.
+ */
+exports.onStaffAccountWritten = onDocumentWritten("staff_accounts/{staffId}", async (event) => {
+    const staffId = event.params.staffId;
+    const afterData = event.data?.after?.data();
+    const beforeData = event.data?.before?.data();
+
+    // Prevent infinite loop if only claimsUpdatedAt was touched
+    if (beforeData && afterData) {
+        const bKeys = Object.keys(beforeData).filter(k => k !== 'claimsUpdatedAt');
+        const aKeys = Object.keys(afterData).filter(k => k !== 'claimsUpdatedAt');
+        if (bKeys.length === aKeys.length && bKeys.every(k => JSON.stringify(beforeData[k]) === JSON.stringify(afterData[k]))) {
+            return;
+        }
+    }
+
+    console.log(`[TRIGGER: onStaffAccountWritten] Staff account ${staffId} updated, recomputing claims...`);
+    try {
+        let authUid = afterData?.uid || staffId;
+        let authUser = await admin.auth().getUser(authUid).catch(() => null);
+        if (!authUser && (afterData?.email || beforeData?.email)) {
+            const email = afterData?.email || beforeData?.email;
+            authUser = await admin.auth().getUserByEmail(email).catch(() => null);
+            if (authUser) authUid = authUser.uid;
+        }
+
+        if (authUser) {
+            if (!event.data?.after?.exists) {
+                await admin.auth().setCustomUserClaims(authUid, {});
+                console.log(`[TRIGGER: onStaffAccountWritten] Cleared claims for deleted staff ${authUid}`);
+            } else {
+                await computeAndApplyUserClaims(authUid, staffId, afterData);
+                await event.data.after.ref.update({
+                    claimsUpdatedAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+                console.log(`[TRIGGER: onStaffAccountWritten] Updated claims for ${authUid}`);
+            }
+        }
+    } catch (err) {
+        console.error(`[TRIGGER: onStaffAccountWritten] Error for ${staffId}:`, err);
+    }
+});
+
+/**
+ * onSettingsSitesWritten
+ * Triggered whenever /settings/sites is updated.
+ * Automatically recalculates custom claims for any supervisors whose site assignments changed.
+ */
+exports.onSettingsSitesWritten = onDocumentWritten("settings/sites", async (event) => {
+    if (!event.data?.after?.exists) return;
+    const afterSites = event.data.after.data()?.sites || event.data.after.data()?.sitesList || [];
+    const beforeSites = event.data?.before?.exists ? (event.data.before.data()?.sites || event.data.before.data()?.sitesList || []) : [];
+
+    const extractSupervisors = (sites) => {
+        const sups = new Set();
+        for (const s of sites) {
+            if (s && s.supervisorId) sups.add(s.supervisorId);
+            if (s && Array.isArray(s.supervisorIds)) s.supervisorIds.forEach(id => sups.add(id));
+        }
+        return sups;
+    };
+
+    const beforeSups = extractSupervisors(beforeSites);
+    const afterSups = extractSupervisors(afterSites);
+
+    const changedSups = new Set();
+    for (const id of afterSups) {
+        if (!beforeSups.has(id)) changedSups.add(id);
+    }
+    for (const id of beforeSups) {
+        if (!afterSups.has(id)) changedSups.add(id);
+    }
+
+    if (changedSups.size === 0) return;
+
+    console.log(`[TRIGGER: onSettingsSitesWritten] Supervisor changes detected for: ${Array.from(changedSups).join(', ')}`);
+    const db = admin.firestore();
+
+    for (const supId of changedSups) {
+        try {
+            let authUser = await admin.auth().getUser(supId).catch(() => null);
+            if (!authUser) {
+                const snap = await db.collection('staff_accounts').doc(supId).get();
+                if (snap.exists && snap.data().email) {
+                    authUser = await admin.auth().getUserByEmail(snap.data().email).catch(() => null);
+                }
+            }
+            if (authUser) {
+                await computeAndApplyUserClaims(authUser.uid);
+                console.log(`[TRIGGER: onSettingsSitesWritten] Recomputed claims for supervisor ${authUser.uid}`);
+            }
+        } catch (supErr) {
+            console.warn(`[TRIGGER: onSettingsSitesWritten] Error updating supervisor ${supId}:`, supErr);
+        }
     }
 });
 

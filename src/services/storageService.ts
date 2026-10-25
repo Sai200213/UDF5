@@ -177,9 +177,35 @@ export const uploadFile = async (
     }
 };
 
+const SIGNED_URL_CACHE_PREFIX = 'udf_signed_url_v1_';
+const SIGNED_URL_TTL_MS = 25 * 60 * 1000; // 25 minutes
+
+export const getCachedSignedUrl = (path: string): string | null => {
+    if (typeof window === 'undefined') return null;
+    try {
+        const raw = sessionStorage.getItem(SIGNED_URL_CACHE_PREFIX + path);
+        if (!raw) return null;
+        const entry = JSON.parse(raw);
+        if (entry && entry.url && typeof entry.expiresAt === 'number' && Date.now() < entry.expiresAt) {
+            return entry.url;
+        }
+    } catch {}
+    return null;
+};
+
+export const setCachedSignedUrl = (path: string, url: string): void => {
+    if (typeof window === 'undefined' || !path || !url) return;
+    try {
+        sessionStorage.setItem(SIGNED_URL_CACHE_PREFIX + path, JSON.stringify({
+            url,
+            expiresAt: Date.now() + SIGNED_URL_TTL_MS
+        }));
+    } catch {}
+};
+
 /**
- * Resolves a secure storage path by downloading it as a blob and returning a local Object URL.
- * Prioritizes the getSecureDocumentURL Cloud Function to work seamlessly under deny-all rules.
+ * Resolves a secure storage path by downloading it as a blob and returning a local Object URL or signed URL.
+ * Checks sessionStorage cache first, then calls getSecureDocumentURL Cloud Function.
  */
 export const getSecureURL = async (storagePath: string | any): Promise<string> => {
     // Sanitize: extract storagePath from object if accidentally passed as {storagePath: '...'}
@@ -192,11 +218,18 @@ export const getSecureURL = async (storagePath: string | any): Promise<string> =
         return resolvedPath;
     }
 
+    // 0. Check sessionStorage cache first (0ms latency!)
+    const cached = getCachedSignedUrl(resolvedPath);
+    if (cached) {
+        return cached;
+    }
+
     // Primary: Cloud Function getSecureDocumentURL (bypasses storage.rules deny-all)
     try {
         const getSecureDocFn = httpsCallable<{ storagePath: string }, { success: boolean; url: string }>(functions, 'getSecureDocumentURL');
         const result = await getSecureDocFn({ storagePath: resolvedPath });
         if (result.data?.success && result.data?.url) {
+            setCachedSignedUrl(resolvedPath, result.data.url);
             try {
                 const resp = await fetch(result.data.url);
                 if (resp.ok) {
@@ -237,6 +270,69 @@ export const getSecureURL = async (storagePath: string | any): Promise<string> =
         console.warn("Secure document unavailable at path:", resolvedPath);
         return '';
     }
+};
+
+/**
+ * getBatchSignedURLs (CLOUD-8)
+ * Fetches signed URLs for multiple paths in a single round-trip using getBatchSignedViewUrls Cloud Function.
+ * Reads and updates the 25-minute sessionStorage cache to minimize cloud function cold starts.
+ */
+export const getBatchSignedURLs = async (storagePaths: (string | any)[]): Promise<Record<string, string>> => {
+    const results: Record<string, string> = {};
+    const uncachedPaths: string[] = [];
+
+    for (const raw of storagePaths) {
+        let p: string = typeof raw === 'object' && raw !== null && 'storagePath' in raw
+            ? raw.storagePath
+            : (typeof raw === 'string' ? raw : '');
+        if (!p) continue;
+        if (p.startsWith('http') || p.startsWith('data:') || p.startsWith('blob:')) {
+            results[p] = p;
+            continue;
+        }
+        const cached = getCachedSignedUrl(p);
+        if (cached) {
+            results[p] = cached;
+        } else {
+            uncachedPaths.push(p);
+        }
+    }
+
+    if (uncachedPaths.length === 0) {
+        return results;
+    }
+
+    // Process uncached paths in chunks of 25
+    const CHUNK_SIZE = 25;
+    const batchFn = httpsCallable<{ storagePaths: string[] }, { success: boolean; urls: Record<string, string> }>(
+        functions,
+        'getBatchSignedViewUrls'
+    );
+
+    for (let i = 0; i < uncachedPaths.length; i += CHUNK_SIZE) {
+        const chunk = uncachedPaths.slice(i, i + CHUNK_SIZE);
+        try {
+            const resp = await batchFn({ storagePaths: chunk });
+            if (resp.data?.success && resp.data.urls) {
+                for (const [pathKey, signedUrl] of Object.entries(resp.data.urls)) {
+                    if (signedUrl) {
+                        results[pathKey] = signedUrl;
+                        setCachedSignedUrl(pathKey, signedUrl);
+                    }
+                }
+            }
+        } catch (batchErr) {
+            console.warn('[STORAGE] getBatchSignedURLs chunk error, falling back to sequential getSecureURL:', batchErr);
+            await Promise.all(chunk.map(async (p) => {
+                try {
+                    const u = await getSecureURL(p);
+                    if (u) results[p] = u;
+                } catch {}
+            }));
+        }
+    }
+
+    return results;
 };
 
 /**

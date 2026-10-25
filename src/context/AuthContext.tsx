@@ -106,6 +106,53 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         };
     }, []);
 
+    // CLOUD-3: Real-time custom claims & permissions sync listener for Admin/Staff
+    useEffect(() => {
+        if (!user || user.type !== UserType.ADMIN || !user.id) return;
+
+        let unsubStaff: (() => void) | null = null;
+        const listenForClaimUpdates = async () => {
+            try {
+                const { db } = await import('../firebase/config');
+                const { doc, onSnapshot } = await import('firebase/firestore');
+
+                const staffRef = doc(db, 'staff_accounts', user.id);
+                unsubStaff = onSnapshot(staffRef, async (snap) => {
+                    if (snap.exists()) {
+                        const data = snap.data();
+                        // If claims were updated on server, refresh JWT token immediately
+                        if (data.claimsUpdatedAt) {
+                            try {
+                                log.log('AuthContext: Detected claimsUpdatedAt update, refreshing Firebase Auth JWT token...');
+                                await auth.currentUser?.getIdToken(true);
+                            } catch (tokenErr) {
+                                log.warn('AuthContext: Could not refresh token on claims change:', tokenErr);
+                            }
+                        }
+                        // Update local user state if role, permissions, or sites changed
+                        if (data.roleId !== user.roleId || JSON.stringify(data.sitesManaged) !== JSON.stringify(user.sitesManaged)) {
+                            setUser(prev => prev ? ({
+                                ...prev,
+                                roleId: data.roleId || prev.roleId,
+                                sitesManaged: data.sitesManaged || prev.sitesManaged,
+                                permissionOverrides: data.permissionOverrides || prev.permissionOverrides
+                            }) : null);
+                        }
+                    }
+                }, (err) => {
+                    log.warn('AuthContext: staff_accounts claim listener warning:', err);
+                });
+            } catch (setupErr) {
+                log.warn('AuthContext: Could not attach staff claim listener:', setupErr);
+            }
+        };
+
+        listenForClaimUpdates();
+        return () => {
+            if (unsubStaff) unsubStaff();
+        };
+    }, [user?.id, user?.type]);
+
     return (
         <AuthContext.Provider value={{ user, loading, setUser, lockSession, unlockSession }}>
             {children}
