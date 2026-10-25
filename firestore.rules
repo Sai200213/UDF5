@@ -50,12 +50,30 @@ service cloud.firestore {
               request.auth.token.get('sitesManaged', []).hasAny([siteId]));
     }
 
-    // Account active helper (still used for correction_requests and specific paths
-    // where legacy non-staff accounts need checking)
-    function isAccountActive(path) {
-      return exists(path) &&
-        get(path).data.get('isDisabled', false) != true &&
-        get(path).data.get('isActive', true) != false;
+    // Staff operational permissions for managing employees / submissions
+    function canAdminManageEmployees() {
+      return isSuperAdmin() ||
+             hasPermission('SUBMISSIONS_APPROVE') ||
+             hasPermission('EMPLOYEES_MANAGE_DEPLOYMENTS') ||
+             hasPermission('EMPLOYEES_MANAGE_CLIENT_IDS') ||
+             hasPermission('EMPLOYEES_REQUEST_CORRECTION') ||
+             hasPermission('EMPLOYEES_MARK_PROFILE_COMPLETE') ||
+             hasPermission('ACCOUNT_UPDATES_APPROVE') ||
+             hasPermission('LEAVES_APPROVE') ||
+             hasPermission('RESIGNATIONS_APPROVE') ||
+             hasPermission('EMPLOYEES_IMPORT');
+    }
+
+    function canAdminDeleteEmployees() {
+      return isSuperAdmin() ||
+             hasPermission('DELETE_EMPLOYEE') ||
+             hasPermission('SUBMISSIONS_APPROVE');
+    }
+
+    function canAdminCreateEmployees() {
+      return isSuperAdmin() ||
+             hasPermission('SUBMISSIONS_APPROVE') ||
+             hasPermission('EMPLOYEES_IMPORT');
     }
 
     // Helper to get user's role ID — used only for notification targeting
@@ -169,7 +187,7 @@ service cloud.firestore {
         resource.data.get('uid', '') == request.auth.uid || 
         resource.data.get('linkedUid', '') == request.auth.uid
       ));
-      allow update: if hasPermission('SUBMISSIONS_APPROVE') || isSuperAdmin() 
+      allow update: if canAdminManageEmployees() 
         || (hasActiveCorrectionToken(resource.data) &&
             request.resource.data.activeCorrectionToken == null &&
             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['profileData', 'data', 'lastUpdated', 'activeCorrectionToken', 'panNumber', 'aadhaarNumber', 'uanNumber', 'phoneNumber']))
@@ -188,7 +206,8 @@ service cloud.firestore {
             request.resource.data.uid == request.auth.uid &&
             (resource.data.get('linkedGoogleEmail', '') == request.auth.token.email || resource.data.get('email', '') == request.auth.token.email || resource.data.get('username', '') == request.auth.token.email)
         );
-      allow create, delete: if hasPermission('SUBMISSIONS_APPROVE') || isSuperAdmin();
+      allow create: if canAdminCreateEmployees();
+      allow delete: if canAdminDeleteEmployees();
     }
 
     // ─── Onboarding Submissions ──────────────────────────────────────────────
@@ -206,12 +225,12 @@ service cloud.firestore {
         ))
       ));
       allow create: if isAuthenticated();
-      allow update: if hasPermission('SUBMISSIONS_APPROVE') || isSuperAdmin() 
+      allow update: if canAdminManageEmployees() 
         || (hasActiveCorrectionToken(resource.data) &&
             request.resource.data.activeCorrectionToken == null &&
             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['formData', 'data', 'profileData', 'lastUpdated', 'activeCorrectionToken', 'panNumber', 'aadhaarNumber', 'uanNumber', 'phoneNumber', 'applicantName', 'driveFolderName', 'duplicateCheck']))
         || (isAuthenticated() && (resource.id == request.auth.uid || resource.data.uid == request.auth.uid || resource.data.linkedUid == request.auth.uid));
-      allow delete: if hasPermission('SUBMISSIONS_APPROVE') || isSuperAdmin(); 
+      allow delete: if canAdminDeleteEmployees(); 
     }
 
     // ─── Draft Submissions ───────────────────────────────────────────────────
