@@ -84,7 +84,7 @@ const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
 
             // 4. Link via Cloud Function (completes the actual linking in backend)
             const { linkGoogleAccount } = await import('../../src/services/employeeService');
-            await linkGoogleAccount(employeeId, currentPassword, googleResult.uid, googleResult.email);
+            await linkGoogleAccount(employeeId, currentPassword, googleResult.uid, googleResult.email, googleResult.idToken);
 
             setStatus('success');
             setMsg(activeTab === 'change_google'

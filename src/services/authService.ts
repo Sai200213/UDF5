@@ -168,7 +168,7 @@ export const getEmployeeProfile = async (firebaseUser: FirebaseUser): Promise<Us
  * STRICT SCOPE: Search 'staff_accounts' AND 'staff' (due to legacy naming split).
  */
 export const getStaffProfile = async (firebaseUser: FirebaseUser): Promise<User | null> => {
-    const collNames = ['staff_accounts'];
+    const collNames = ['staff_accounts', 'staff'];
     
     try {
         for (const collName of collNames) {
@@ -275,6 +275,7 @@ export const getAdminProfile = async (firebaseUser: FirebaseUser): Promise<User 
                     await auth.signOut();
                     throw new Error("This account does not exist or has been disabled. Please contact the administrator.");
                 }
+                await stampAdminClaims(firebaseUser);
                 return {
                     type: UserType.ADMIN,
                     id: data.username || qSnap.docs[0].id,

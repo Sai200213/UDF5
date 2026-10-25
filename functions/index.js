@@ -985,7 +985,7 @@ exports.linkEmployeeGoogleAccount = functions.https.onCall(async (request) => {
             console.error('Failed to verify Google ID token:', tokErr);
             throw new functions.https.HttpsError('unauthenticated', 'Invalid Google authentication token');
         }
-    } else if (request.auth && request.auth.uid) {
+    } else if (!googleUid && request.auth && request.auth.uid) {
         googleUid = request.auth.uid;
         if (request.auth.token && request.auth.token.email) {
             email = request.auth.token.email;
@@ -3175,8 +3175,26 @@ exports.setAdminClaims = functions.https.onCall(async (request) => {
         }
 
         const roleId = doc.roleId || 'none';
-        const sitesManaged = doc.sitesManaged || [];
         const isSuperAdmin = roleId === 'role-super-admin' || !!userDoc;
+
+        // Resolve all sites managed (from staff doc and settings/sites supervisor assignments)
+        const sitesManagedSet = new Set(Array.isArray(doc.sitesManaged) ? doc.sitesManaged.filter(Boolean) : []);
+        try {
+            const sitesSnap = await db.collection('settings').doc('sites').get();
+            if (sitesSnap.exists) {
+                const data = sitesSnap.data() || {};
+                const list = Array.isArray(data.sites) ? data.sites : (Array.isArray(data.sitesList) ? data.sitesList : []);
+                for (const s of list) {
+                    if (!s || !s.id) continue;
+                    if (s.supervisorId === uid || (Array.isArray(s.supervisorIds) && s.supervisorIds.includes(uid))) {
+                        sitesManagedSet.add(s.id);
+                    }
+                }
+            }
+        } catch (sitesErr) {
+            console.warn('[setAdminClaims] Error reading settings/sites:', sitesErr);
+        }
+        const sitesManaged = Array.from(sitesManagedSet);
 
         // Fetch permissions from the roles collection
         let permissions = [];
@@ -3258,9 +3276,27 @@ exports.refreshAdminClaims = functions.https.onCall(async (request) => {
         }
 
         const roleId = doc.roleId || 'none';
-        const sitesManaged = doc.sitesManaged || [];
         const isTargetSuperAdmin = roleId === 'role-super-admin' || !!userDoc;
         const permissionOverrides = doc.permissionOverrides || {};
+
+        // Resolve all sites managed (from staff doc and settings/sites supervisor assignments)
+        const sitesManagedSet = new Set(Array.isArray(doc.sitesManaged) ? doc.sitesManaged.filter(Boolean) : []);
+        try {
+            const sitesSnap = await db.collection('settings').doc('sites').get();
+            if (sitesSnap.exists) {
+                const data = sitesSnap.data() || {};
+                const list = Array.isArray(data.sites) ? data.sites : (Array.isArray(data.sitesList) ? data.sitesList : []);
+                for (const s of list) {
+                    if (!s || !s.id) continue;
+                    if (s.supervisorId === targetUid || (Array.isArray(s.supervisorIds) && s.supervisorIds.includes(targetUid))) {
+                        sitesManagedSet.add(s.id);
+                    }
+                }
+            }
+        } catch (sitesErr) {
+            console.warn('[refreshAdminClaims] Error reading settings/sites:', sitesErr);
+        }
+        const sitesManaged = Array.from(sitesManagedSet);
 
         let permissions = [];
         if (roleId && roleId !== 'none') {

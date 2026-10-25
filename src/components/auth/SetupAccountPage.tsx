@@ -22,19 +22,18 @@ const SetupAccountPage: React.FC = () => {
         setLoading(true);
         setError('');
         try {
-            const { googleSignIn } = await import('../../utils/googleAuthHelper');
-            const result = await googleSignIn();
+            const { getGoogleCredentialSafely } = await import('../../utils/googleAuthHelper');
+            const result = await getGoogleCredentialSafely();
 
             // Link this Google Account to the Employee Record safely via Cloud Function
             if (user && user.employeeId) {
                 const functions = getFunctions();
                 const selfLinkGoogleFn = httpsCallable(functions, 'selfLinkGoogleAccount');
-                const googleIdToken = await result.user.getIdToken();
                 await selfLinkGoogleFn({
                     employeeId: user.employeeId,
-                    googleUid: result.user.uid,
-                    email: result.user.email,
-                    googleIdToken
+                    googleUid: result.uid,
+                    email: result.email,
+                    googleIdToken: result.idToken
                 });
 
                 // Update local context

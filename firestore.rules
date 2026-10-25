@@ -121,28 +121,41 @@ service cloud.firestore {
     match /settings/{docId} {
       allow read: if true;
       allow write: if isSuperAdmin() || hasPermission('MANAGE_SYSTEM') ||
-        (docId == 'sites' && (hasPermission('SITES_MANAGE') || hasPermission('SITES_EDIT_INFO'))) ||
+        (docId == 'sites' && (hasPermission('SITES_MANAGE') || hasPermission('SITES_EDIT_INFO') || hasPermission('MANAGE_SITES'))) ||
         (docId == 'workflows' && hasPermission('MANAGE_WORKFLOWS')) ||
-        (docId == 'form_sections' && hasPermission('MANAGE_FORMS'));
+        (docId == 'form_sections' && (hasPermission('MANAGE_FORMS') || hasPermission('MANAGE_FORM_SECTIONS'))) ||
+        (docId == 'portal_config' && (hasPermission('MANAGE_SYSTEM') || hasPermission('MANAGE_WORKFLOWS') || hasPermission('BGV_CONFIGURE_FIELDS'))) ||
+        (docId == 'leave_policy' && (hasPermission('MANAGE_LEAVE_TYPES') || hasPermission('LEAVES_APPROVE'))) ||
+        (docId == 'editable_fields' && (hasPermission('MANAGE_SYSTEM') || hasPermission('MANAGE_WORKFLOWS'))) ||
+        (docId == 'gamification_rules' && hasPermission('MANAGE_SYSTEM')) ||
+        (docId == 'legacy_claim_config' && hasPermission('MANAGE_SYSTEM')) ||
+        (docId == 'public_stats' && (isSuperAdmin() || isAdmin() || hasPermission('MANAGE_SYSTEM')));
+    }
+
+    // ─── Contact Us Inquiries ────────────────────────────────────────────────
+    match /contact_messages/{id} {
+      allow create: if request.resource.data.name is string && request.resource.data.name.size() > 0;
+      allow read, delete: if isAdmin();
+      allow update: if false;
     }
 
     // ─── Admin / Super-Admin Accounts ───────────────────────────────────────
     match /users/{userId} {
-      allow get: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
-      allow list: if isAdmin();
+      allow get: if isAuthenticated() && (request.auth.uid == userId || isAdmin() || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', '')));
+      allow list: if isAdmin() || (isAuthenticated() && request.auth.token.get('email', '') != '');
       allow write: if isSuperAdmin();
     }
 
     // ─── Staff Accounts ─────────────────────────────────────────────────────
     match /staff_accounts/{userId} {
-      allow get: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
-      allow list: if isAdmin();
+      allow get: if isAuthenticated() && (request.auth.uid == userId || isAdmin() || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', '')));
+      allow list: if isAdmin() || (isAuthenticated() && request.auth.token.get('email', '') != '');
       allow write: if isSuperAdmin();
     }
 
     match /staff/{userId} {
-      allow get: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
-      allow list: if isAdmin();
+      allow get: if isAuthenticated() && (request.auth.uid == userId || isAdmin() || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', '')));
+      allow list: if isAdmin() || (isAuthenticated() && request.auth.token.get('email', '') != '');
       allow write: if isSuperAdmin();
     }
 
@@ -309,14 +322,14 @@ service cloud.firestore {
       ) || (
         isSuperAdmin()
       ) || (
-        request.resource.data.status == 'Approved' && (hasPermission('RESIGNATIONS_APPROVE') || isAdmin())
+        request.resource.data.status == 'Approved' && (hasPermission('RESIGNATIONS_APPROVE') || isSuperAdmin())
       ) || (
-        request.resource.data.status == 'Rejected' && (hasPermission('RESIGNATIONS_REJECT') || hasPermission('RESIGNATIONS_APPROVE') || isAdmin())
+        request.resource.data.status == 'Rejected' && (hasPermission('RESIGNATIONS_REJECT') || hasPermission('RESIGNATIONS_APPROVE') || isSuperAdmin())
       ) || (
         (request.resource.data.currentLevel < resource.data.currentLevel || (resource.data.status != 'Pending' && request.resource.data.status == 'Pending')) && 
-        (hasPermission('RESIGNATIONS_REVERT_DECISION') || hasPermission('RESIGNATIONS_APPROVE') || isAdmin())
+        (hasPermission('RESIGNATIONS_REVERT_DECISION') || hasPermission('RESIGNATIONS_APPROVE') || isSuperAdmin())
       ) || (
-        hasPermission('RESIGNATIONS_APPROVE') || isAdmin()
+        hasPermission('RESIGNATIONS_APPROVE') || isSuperAdmin()
       );
       allow delete: if hasPermission('RESIGNATIONS_DELETE') || hasPermission('RESIGNATIONS_APPROVE') || isSuperAdmin();
     }
@@ -324,8 +337,13 @@ service cloud.firestore {
     // ─── Disciplinary Actions ────────────────────────────────────────────────
     match /disciplinary_actions/{id} {
       allow read: if isAdmin() || 
-                     (isAuthenticated() && (resource.data.employeeId == request.auth.uid || resource.data.get('targetUserId', '') == request.auth.uid));
-      allow write: if hasPermission('DISCIPLINE_MANAGE') || isSuperAdmin();
+                     (isAuthenticated() && (
+                       resource.data.employeeId == request.auth.uid || 
+                       resource.data.get('targetUserId', '') == request.auth.uid ||
+                       isOwnerOfPortalId(resource.data.employeeId) ||
+                       (resource.data.get('portalId', '') != '' && isOwnerOfPortalId(resource.data.portalId))
+                     ));
+      allow write: if hasPermission('DISCIPLINE_MANAGE') || hasPermission('DISCIPLINE_CREATE') || isSuperAdmin();
     }
 
     // ─── Legacy Employee Imports ─────────────────────────────────────────────

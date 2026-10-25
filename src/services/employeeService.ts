@@ -4625,7 +4625,8 @@ export const linkGoogleAccount = async (
     employeeId: string,
     currentPassword: string,
     googleUid: string,
-    googleEmail: string
+    googleEmail: string,
+    googleIdToken?: string
 ): Promise<void> => {
     try {
         const linkEmployeeGoogleAccount = httpsCallable(functions, 'linkEmployeeGoogleAccount');
@@ -4633,7 +4634,8 @@ export const linkGoogleAccount = async (
             employeeId,
             currentPassword,
             googleUid,
-            email: googleEmail
+            email: googleEmail,
+            idToken: googleIdToken
         });
         log.log(`Linked Google Account (${googleEmail}) to employee: ${employeeId} via Cloud Function`);
     } catch (error: any) {
