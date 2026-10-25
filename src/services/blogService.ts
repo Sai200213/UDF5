@@ -1,6 +1,6 @@
 import { db, storage, auth } from '../firebase/config';
 import { collection, doc, getDocs, addDoc, updateDoc, deleteDoc, query, orderBy, where, serverTimestamp } from 'firebase/firestore';
-import { ref, deleteObject } from 'firebase/storage';
+import { deleteStorageFile } from './storageService';
 import { logSystemAction } from './auditService';
 
 export interface BlogPost {
@@ -94,10 +94,9 @@ export const updateBlogPost = async (id: string, updates: Partial<Omit<BlogPost,
 };
 
 export const deleteBlogPost = async (id: string, imageUrl?: string): Promise<void> => {
-    if (imageUrl && (imageUrl.includes('firebasestorage.googleapis.com') || imageUrl.includes('storage.googleapis.com'))) {
+    if (imageUrl) {
         try {
-            const storageRef = ref(storage, imageUrl);
-            await deleteObject(storageRef);
+            await deleteStorageFile(imageUrl);
         } catch (err) {
             console.warn('Could not delete storage image for blog post:', err);
         }

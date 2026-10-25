@@ -4,8 +4,21 @@ import { storage, functions, auth, ensureAuthenticated } from '../firebase/confi
 
 /**
  * Recursively calculates the total storage consumption of a folder in bytes.
+ * Tries the getStorageFolderSizeServer Cloud Function first (bypassing deny-all rules),
+ * falling back to client-side listAll.
  */
 export const getStorageFolderSize = async (folderPath: string): Promise<number> => {
+    if (!folderPath) return 0;
+    try {
+        const getSizeFn = httpsCallable<{ folderPath: string }, { totalBytes: number }>(functions, 'getStorageFolderSizeServer');
+        const res = await getSizeFn({ folderPath });
+        if (res.data && typeof res.data.totalBytes === 'number') {
+            return res.data.totalBytes;
+        }
+    } catch (cfErr) {
+        // Fall back to client-side calculation
+    }
+
     try {
         const folderRef = ref(storage, folderPath);
         const res = await listAll(folderRef);
@@ -166,6 +179,7 @@ export const uploadFile = async (
 
 /**
  * Resolves a secure storage path by downloading it as a blob and returning a local Object URL.
+ * Prioritizes the getSecureDocumentURL Cloud Function to work seamlessly under deny-all rules.
  */
 export const getSecureURL = async (storagePath: string | any): Promise<string> => {
     // Sanitize: extract storagePath from object if accidentally passed as {storagePath: '...'}
@@ -178,7 +192,27 @@ export const getSecureURL = async (storagePath: string | any): Promise<string> =
         return resolvedPath;
     }
 
-    // Primary: Direct client-side getBlob (Strictly private in browser memory, never public/shareable)
+    // Primary: Cloud Function getSecureDocumentURL (bypasses storage.rules deny-all)
+    try {
+        const getSecureDocFn = httpsCallable<{ storagePath: string }, { success: boolean; url: string }>(functions, 'getSecureDocumentURL');
+        const result = await getSecureDocFn({ storagePath: resolvedPath });
+        if (result.data?.success && result.data?.url) {
+            try {
+                const resp = await fetch(result.data.url);
+                if (resp.ok) {
+                    const b = await resp.blob();
+                    return URL.createObjectURL(b);
+                }
+                return result.data.url;
+            } catch {
+                return result.data.url;
+            }
+        }
+    } catch (cfError: any) {
+        // Fall back to client getBlob if Cloud Function is unavailable
+    }
+
+    // Direct client-side getBlob fallback (if rules allow or admin)
     try {
         await ensureAuthenticated();
         const blob = await getBlob(ref(storage, resolvedPath));
@@ -195,30 +229,53 @@ export const getSecureURL = async (storagePath: string | any): Promise<string> =
                     const blobFallback = await getBlob(ref(storage, fallbackPath));
                     return URL.createObjectURL(blobFallback);
                 } catch (e2) {
-                    // continue to cloud function fallback
+                    // continue
                 }
             }
         }
 
-        // Secondary Fallback: Use Cloud Function if direct client download was blocked
-        try {
-            const getSecureDocFn = httpsCallable<{ storagePath: string }, { success: boolean; url: string }>(functions, 'getSecureDocumentURL');
-            const result = await getSecureDocFn({ storagePath: resolvedPath });
-            if (result.data?.success && result.data?.url) {
-                try {
-                    const resp = await fetch(result.data.url);
-                    const b = await resp.blob();
-                    return URL.createObjectURL(b);
-                } catch {
-                    return result.data.url;
-                }
-            }
-        } catch (cfError: any) {
-            console.warn("Secure document unavailable at path:", resolvedPath, cfError?.message || cfError);
-        }
-
+        console.warn("Secure document unavailable at path:", resolvedPath);
         return '';
     }
+};
+
+/**
+ * Downloads a file at storagePath as a Blob via getSecureDocumentURL signed URL,
+ * with fallback to direct getBlob.
+ */
+export const getSecureBlob = async (storagePath: string | any): Promise<Blob> => {
+    let resolvedPath: string = typeof storagePath === 'object' && storagePath !== null && 'storagePath' in storagePath
+        ? storagePath.storagePath
+        : (typeof storagePath === 'string' ? storagePath : '');
+
+    if (!resolvedPath) {
+        throw new Error('Empty storage path provided to getSecureBlob');
+    }
+
+    // If it's already a blob/http URL
+    if (resolvedPath.startsWith('blob:') || resolvedPath.startsWith('http')) {
+        const resp = await fetch(resolvedPath);
+        if (!resp.ok) throw new Error(`HTTP error fetching blob: ${resp.status}`);
+        return await resp.blob();
+    }
+
+    // 1. Try secure Cloud Function signed URL
+    try {
+        const getSecureDocFn = httpsCallable<{ storagePath: string }, { success: boolean; url: string }>(functions, 'getSecureDocumentURL');
+        const result = await getSecureDocFn({ storagePath: resolvedPath });
+        if (result.data?.success && result.data?.url) {
+            const resp = await fetch(result.data.url);
+            if (resp.ok) {
+                return await resp.blob();
+            }
+        }
+    } catch (cfErr) {
+        console.warn('[STORAGE] getSecureBlob Cloud Function failed, falling back to direct getBlob:', cfErr);
+    }
+
+    // 2. Direct getBlob fallback
+    await ensureAuthenticated();
+    return await getBlob(ref(storage, resolvedPath));
 };
 
 /**
@@ -413,23 +470,44 @@ function compressImage(file: File, maxSize: number, quality: number): Promise<Fi
 /**
  * Safely deletes a single file in Firebase Storage.
  * Handles storage path string or object containing storagePath.
- * Silently handles missing files and catches errors without crashing.
+ * Calls deleteStoragePath Cloud Function to bypass storage.rules deny-all.
  */
 export const deleteStorageFile = async (filePath: string | any): Promise<boolean> => {
     let resolvedPath: string = typeof filePath === 'object' && filePath !== null && 'storagePath' in filePath
         ? filePath.storagePath
         : (typeof filePath === 'string' ? filePath : '');
 
+    // If full Firebase storage URL was passed, extract the storage path:
+    if (resolvedPath.includes('firebasestorage.googleapis.com')) {
+        const match = resolvedPath.match(/\/o\/([^?#]+)/);
+        if (match && match[1]) {
+            resolvedPath = decodeURIComponent(match[1]);
+        }
+    }
+
     // Skip empty or external/blob URLs
     if (!resolvedPath || resolvedPath.startsWith('http') || resolvedPath.startsWith('blob:') || resolvedPath.startsWith('data:')) {
         return false;
     }
 
+    // 1. Try Cloud Function (Admin SDK on backend)
+    try {
+        const deleteFn = httpsCallable<{ storagePath: string; isFolder?: boolean }, { success: boolean }>(functions, 'deleteStoragePath');
+        const res = await deleteFn({ storagePath: resolvedPath, isFolder: false });
+        if (res.data?.success) {
+            console.log(`[STORAGE] Deleted file via Cloud Function: ${resolvedPath}`);
+            return true;
+        }
+    } catch (cfErr: any) {
+        console.warn(`[STORAGE] deleteStoragePath Cloud Function error for ${resolvedPath}, trying client fallback:`, cfErr?.message || cfErr);
+    }
+
+    // 2. Client-side fallback
     try {
         await ensureAuthenticated();
         const fileRef = ref(storage, resolvedPath);
         await deleteObject(fileRef);
-        console.log(`[STORAGE] Deleted file: ${resolvedPath}`);
+        console.log(`[STORAGE] Deleted file via client SDK: ${resolvedPath}`);
         return true;
     } catch (err: any) {
         if (err?.code === 'storage/object-not-found') {
@@ -443,9 +521,24 @@ export const deleteStorageFile = async (filePath: string | any): Promise<boolean
 
 /**
  * Recursively deletes a folder and all its contents in Firebase Storage.
+ * Calls deleteStoragePath Cloud Function with isFolder: true.
  */
 export const deleteStorageFolder = async (folderPath: string): Promise<void> => {
     if (!folderPath) return;
+
+    // 1. Try Cloud Function (Admin SDK on backend)
+    try {
+        const deleteFn = httpsCallable<{ storagePath: string; isFolder?: boolean }, { success: boolean }>(functions, 'deleteStoragePath');
+        const res = await deleteFn({ storagePath: folderPath, isFolder: true });
+        if (res.data?.success) {
+            console.log(`[STORAGE] Deleted folder via Cloud Function: ${folderPath}`);
+            return;
+        }
+    } catch (cfErr: any) {
+        console.warn(`[STORAGE] deleteStoragePath Cloud Function error for folder ${folderPath}, trying client fallback:`, cfErr?.message || cfErr);
+    }
+
+    // 2. Client-side fallback
     try {
         const folderRef = ref(storage, folderPath);
         const res = await listAll(folderRef);

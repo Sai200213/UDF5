@@ -1970,6 +1970,178 @@ exports.moveStorageFolder = functions.https.onCall(async (request) => {
     }
 });
 
+/**
+ * deleteStoragePath
+ * Securely deletes a file or folder in Firebase Storage on the backend.
+ * Bypasses client-side storage.rules deny-all while verifying caller permissions.
+ */
+exports.deleteStoragePath = functions.https.onCall(async (request) => {
+    if (!request.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'User must be logged in.');
+    }
+
+    const { storagePath, isFolder } = request.data || {};
+    if (!storagePath || typeof storagePath !== 'string') {
+        throw new functions.https.HttpsError('invalid-argument', 'Valid storagePath is required.');
+    }
+
+    const cleanPath = storagePath.replace(/^\/+/, '').trim();
+    if (!cleanPath) {
+        throw new functions.https.HttpsError('invalid-argument', 'storagePath cannot be root.');
+    }
+
+    const uid = request.auth.uid;
+    const db = admin.firestore();
+
+    // 1. Check if caller is Admin or Staff
+    let isAuthorized = false;
+    if (request.auth.token && (request.auth.token.isAdmin || request.auth.token.isSuperAdmin)) {
+        isAuthorized = true;
+    } else {
+        const [userSnap, staffSnap, staffAccSnap] = await Promise.all([
+            db.collection('users').doc(uid).get(),
+            db.collection('staff').doc(uid).get(),
+            db.collection('staff_accounts').doc(uid).get()
+        ]);
+        if (userSnap.exists || staffSnap.exists || staffAccSnap.exists) {
+            const staffDoc = (staffAccSnap.exists ? staffAccSnap.data() : (staffSnap.exists ? staffSnap.data() : userSnap.data())) || {};
+            if (staffDoc.isDisabled !== true && staffDoc.isActive !== false && staffDoc.status !== 'relieved' && staffDoc.status !== 'terminated') {
+                isAuthorized = true;
+            }
+        }
+    }
+
+    // 2. Candidate / Employee self-deletion checks
+    if (!isAuthorized) {
+        // Allow deleting their own files:
+        if (
+            cleanPath.startsWith(`onboarding/${uid}/`) ||
+            cleanPath.startsWith(`draft_submissions/${uid}/`) ||
+            cleanPath.startsWith(`users/${uid}/`) ||
+            cleanPath.startsWith(`employees/${uid}/`) ||
+            cleanPath === `onboarding/${uid}` ||
+            cleanPath === `draft_submissions/${uid}` ||
+            cleanPath === `users/${uid}` ||
+            cleanPath === `employees/${uid}`
+        ) {
+            isAuthorized = true;
+        } else if (cleanPath.startsWith('onboarding/')) {
+            const folderId = cleanPath.split('/')[1];
+            if (folderId) {
+                // Check draft_submissions or onboarding_submissions
+                const [draftDoc, subDoc] = await Promise.all([
+                    db.collection('draft_submissions').doc(folderId).get(),
+                    db.collection('onboarding_submissions').doc(folderId).get()
+                ]);
+                if (draftDoc.exists) {
+                    const dd = draftDoc.data();
+                    if (dd.ownerUid === uid || dd.activeSessionUid === uid || dd.uid === uid || dd.linkedUid === uid) {
+                        isAuthorized = true;
+                    }
+                }
+                if (!isAuthorized && subDoc.exists) {
+                    const sd = subDoc.data();
+                    if (sd.linkedUid === uid || sd.uid === uid || sd.employeeId === uid) {
+                        isAuthorized = true;
+                    }
+                }
+            }
+        } else if (cleanPath.startsWith('employees/')) {
+            const empId = cleanPath.split('/')[1];
+            if (empId) {
+                const empDoc = await db.collection('employees').doc(empId).get();
+                if (empDoc.exists) {
+                    const ed = empDoc.data();
+                    if (ed.linkedUid === uid || ed.uid === uid || ed.portalId === uid) {
+                        isAuthorized = true;
+                    } else if (ed.activeCorrectionToken) {
+                        const crDoc = await db.collection('correction_requests').doc(ed.activeCorrectionToken).get();
+                        if (crDoc.exists && crDoc.data().status === 'pending') {
+                            isAuthorized = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (!isAuthorized) {
+        console.warn(`[SECURITY] Unauthorized delete attempt by ${uid} on path: ${cleanPath}`);
+        throw new functions.https.HttpsError('permission-denied', 'Permission denied to delete storage path.');
+    }
+
+    try {
+        const bucket = admin.storage().bucket();
+        if (isFolder || cleanPath.endsWith('/')) {
+            const prefix = cleanPath.endsWith('/') ? cleanPath : cleanPath + '/';
+            await bucket.deleteFiles({ prefix, force: true });
+        } else {
+            // Delete exact file
+            const file = bucket.file(cleanPath);
+            const [exists] = await file.exists();
+            if (exists) {
+                await file.delete();
+            } else {
+                // If not found as exact file, try deleting files with prefix just in case it's a folder without trailing slash
+                await bucket.deleteFiles({ prefix: cleanPath + '/', force: true });
+            }
+        }
+        return { success: true };
+    } catch (err) {
+        console.error(`[deleteStoragePath] Error deleting ${cleanPath}:`, err);
+        throw new functions.https.HttpsError('internal', 'Failed to delete storage path.');
+    }
+});
+
+/**
+ * getStorageFolderSizeServer
+ * Computes folder storage consumption on backend using Admin SDK.
+ */
+exports.getStorageFolderSizeServer = functions.https.onCall(async (request) => {
+    if (!request.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'User must be logged in.');
+    }
+
+    const { folderPath } = request.data || {};
+    if (!folderPath || typeof folderPath !== 'string') {
+        return { totalBytes: 0 };
+    }
+
+    const cleanPath = folderPath.replace(/^\/+/, '').trim();
+    const uid = request.auth.uid;
+    const db = admin.firestore();
+
+    // Check authorization: caller can view their own folder or must be staff/admin
+    let isAuthorized = cleanPath.startsWith(`onboarding/${uid}`) || cleanPath.startsWith(`draft_submissions/${uid}`) || cleanPath.startsWith(`employees/${uid}`);
+    if (!isAuthorized) {
+        if (request.auth.token && (request.auth.token.isAdmin || request.auth.token.isSuperAdmin)) {
+            isAuthorized = true;
+        } else {
+            const staffSnap = await db.collection('staff_accounts').doc(uid).get();
+            if (staffSnap.exists) isAuthorized = true;
+        }
+    }
+
+    if (!isAuthorized) {
+        return { totalBytes: 0 };
+    }
+
+    try {
+        const bucket = admin.storage().bucket();
+        const prefix = cleanPath.endsWith('/') ? cleanPath : cleanPath + '/';
+        const [files] = await bucket.getFiles({ prefix });
+        let totalBytes = 0;
+        for (const file of files) {
+            const size = parseInt(file.metadata?.size || '0', 10);
+            if (!isNaN(size)) totalBytes += size;
+        }
+        return { totalBytes };
+    } catch (err) {
+        console.warn(`[getStorageFolderSizeServer] Failed for ${cleanPath}:`, err);
+        return { totalBytes: 0 };
+    }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // RECYCLE BIN AUTOMATED CLEANUP
 // ─────────────────────────────────────────────────────────────────────────────

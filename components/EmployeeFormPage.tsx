@@ -15,7 +15,7 @@ import { subscribeToLegacyClaimConfig } from '../src/services/adminService';
 import { signOut } from 'firebase/auth';
 import { auth, storage, ensureAuthenticated } from '../src/firebase/config';
 import { ref, getDownloadURL, getBlob } from 'firebase/storage';
-import { uploadSubmissionDocument, deleteStorageFile } from '../src/services/storageService';
+import { uploadSubmissionDocument, deleteStorageFile, getSecureURL } from '../src/services/storageService';
 import { saveFileToSession, removeFileFromSession, getAllFilesFromSession, clearFileSession } from '../src/utils/fileSessionStore';
 
 // Import employee-specific field components
@@ -3075,10 +3075,12 @@ const EmployeeFormPage: React.FC<EmployeeFormPageProps> = ({ sections, isLoading
                                       target.innerText = 'Loading...';
                                       target.style.pointerEvents = 'none';
                                       try {
-                                        await ensureAuthenticated();
-                                        const blob = await getBlob(ref(storage, valPath));
-                                        const url = URL.createObjectURL(blob);
-                                        window.open(url, '_blank');
+                                        const url = await getSecureURL(valPath);
+                                        if (url) {
+                                          window.open(url, '_blank');
+                                        } else {
+                                          throw new Error("Could not obtain document URL");
+                                        }
                                       } catch (err) {
                                         console.error("Failed to view file:", err);
                                         alert("Failed to view document.");

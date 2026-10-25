@@ -41,7 +41,7 @@ import {
     submitToGoogleForm, createEmployeeFolder, copyFolderContents, copySpecificSubfolders,
     approveEmployeeFolder
 } from './driveService';
-import { uploadSubmissionDocument, deleteStorageFolder, moveStorageFiles, uploadEmployeeDocument } from './storageService';
+import { uploadSubmissionDocument, deleteStorageFolder, deleteStorageFile, moveStorageFiles, uploadEmployeeDocument, getSecureBlob } from './storageService';
 import { generateDefaultPassword } from '../utils/bulkImportUtils';
 import { logSystemAction } from './auditService';
 
@@ -3046,16 +3046,13 @@ export const syncDriveFolder = async (recordId: string) => {
     };
     extractPaths(formData);
 
-    const { getBlob, ref } = await import('firebase/storage');
-    const { storage } = await import('../firebase/config');
     const { uploadToDrive, submitToGoogleForm } = await import('./driveService');
 
     const updatedFormData = { ...formData };
     let uploadedCount = 0;
     for (const item of storagePaths) {
         try {
-            const storageRef = ref(storage, item.path);
-            const blob = await getBlob(storageRef);
+            const blob = await getSecureBlob(item.path);
             const fileName = item.path.split('/').pop() || 'document.pdf';
             const fileObj = new File([blob], fileName, { type: blob.type });
             const driveUrl = await uploadToDrive(fileObj, applicantName, "Joining Documents", folderId);
@@ -4891,9 +4888,7 @@ export const submitCorrectionResponse = async (
                     if (oldDoc && typeof oldDoc === 'object' && oldDoc.storagePath) {
                         log.log(`[STORAGE_CLEANUP] Deleting replaced file from Firebase Storage: ${oldDoc.storagePath}`);
                         try {
-                            const { ref, deleteObject } = await import('firebase/storage');
-                            const { storage } = await import('../firebase/config');
-                            await deleteObject(ref(storage, oldDoc.storagePath));
+                            await deleteStorageFile(oldDoc.storagePath);
                         } catch (delErr) {
                             log.error(`[STORAGE_CLEANUP] Failed to delete old storage file:`, delErr);
                         }
@@ -4915,10 +4910,7 @@ export const submitCorrectionResponse = async (
                 onProgress?.(key, 'loading', 10);
                 try {
                     log.log(`[DRIVE_BACKUP] Resolving background file: ${value}`);
-                    const { getBlob, ref } = await import('firebase/storage');
-                    const { storage } = await import('../firebase/config');
-                    
-                    const blob = await getBlob(ref(storage, value));
+                    const blob = await getSecureBlob(value);
                     const cleanName = getCleanFileName(value);
                     const fileObj = new File([blob], cleanName, { type: blob.type });
                     
@@ -4941,8 +4933,7 @@ export const submitCorrectionResponse = async (
                         if (oldDoc && typeof oldDoc === 'object' && oldDoc.storagePath && oldDoc.storagePath !== finalStoragePath && oldDoc.storagePath !== value) {
                             log.log(`[STORAGE_CLEANUP] Deleting replaced file from Firebase Storage: ${oldDoc.storagePath}`);
                             try {
-                                const { deleteObject } = await import('firebase/storage');
-                                await deleteObject(ref(storage, oldDoc.storagePath));
+                                await deleteStorageFile(oldDoc.storagePath);
                             } catch (delErr) {
                                 log.error(`[STORAGE_CLEANUP] Failed to delete old storage file:`, delErr);
                             }

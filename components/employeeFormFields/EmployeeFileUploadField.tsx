@@ -5,7 +5,7 @@ import { Camera, Upload, FileText, CheckCircle2, Crop, Trash2, AlertCircle, Eye,
 import Button from '../common/Button';
 import { ref, getBlob } from 'firebase/storage';
 import { storage, ensureAuthenticated } from '../../src/firebase/config';
-import { uploadSubmissionDocument, autoCompressFile } from '../../src/services/storageService';
+import { uploadSubmissionDocument, autoCompressFile, getSecureURL } from '../../src/services/storageService';
 
 const EmployeeFileUploadField: React.FC<EmployeeFieldProps> = ({ field, value, onChange, error, disabled }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -103,12 +103,10 @@ const EmployeeFileUploadField: React.FC<EmployeeFieldProps> = ({ field, value, o
           try {
             const isImg = /\.(jpg|jpeg|png|webp)$/i.test(valPath);
             if (isImg) {
-              await ensureAuthenticated();
-              const blob = await getBlob(ref(storage, valPath));
-              const localUrl = createLocalUrl(blob);
-              if (active) {
-                setResolvedUrl(localUrl);
-                setLocalThumbnail(localUrl);
+              const secureUrl = await getSecureURL(valPath);
+              if (active && secureUrl) {
+                setResolvedUrl(secureUrl);
+                setLocalThumbnail(secureUrl);
               }
             } else {
               if (active) {
@@ -419,11 +417,13 @@ const EmployeeFileUploadField: React.FC<EmployeeFieldProps> = ({ field, value, o
                     } else {
                       setIsResolving(true);
                       try {
-                        await ensureAuthenticated();
-                        const blob = await getBlob(ref(storage, valPath));
-                        const localUrl = createLocalUrl(blob);
-                        setResolvedUrl(localUrl);
-                        window.open(localUrl, '_blank', 'noopener,noreferrer');
+                        const secureUrl = await getSecureURL(valPath);
+                        if (secureUrl) {
+                          setResolvedUrl(secureUrl);
+                          window.open(secureUrl, '_blank', 'noopener,noreferrer');
+                        } else {
+                          throw new Error("Could not obtain secure document URL");
+                        }
                       } catch (err) {
                         console.error("Failed to view secure document:", err);
                         alert("Failed to view document.");
