@@ -2079,10 +2079,18 @@ exports.deleteStoragePath = functions.https.onCall(async (request) => {
         } else if (cleanPath.startsWith('employees/')) {
             const empId = cleanPath.split('/')[1];
             if (empId) {
-                const empDoc = await db.collection('employees').doc(empId).get();
-                if (empDoc.exists) {
+                let empDoc = await db.collection('employees').doc(empId).get();
+                if (!empDoc.exists) {
+                    const byEmpId = await db.collection('employees').where('employeeId', '==', empId).limit(1).get();
+                    if (!byEmpId.empty) empDoc = byEmpId.docs[0];
+                    else {
+                        const byPortalId = await db.collection('employees').where('portalId', '==', empId).limit(1).get();
+                        if (!byPortalId.empty) empDoc = byPortalId.docs[0];
+                    }
+                }
+                if (empDoc && empDoc.exists) {
                     const ed = empDoc.data();
-                    if (ed.linkedUid === uid || ed.uid === uid || ed.portalId === uid) {
+                    if (ed.linkedUid === uid || ed.uid === uid || ed.portalId === uid || ed.employeeId === uid || empDoc.id === uid) {
                         isAuthorized = true;
                     } else if (ed.activeCorrectionToken) {
                         const crDoc = await db.collection('correction_requests').doc(ed.activeCorrectionToken).get();
@@ -2149,6 +2157,42 @@ exports.getStorageFolderSizeServer = functions.https.onCall(async (request) => {
         } else {
             const staffSnap = await db.collection('staff_accounts').doc(uid).get();
             if (staffSnap.exists) isAuthorized = true;
+        }
+    }
+    if (!isAuthorized && cleanPath.startsWith('onboarding/')) {
+        const draftId = cleanPath.split('/')[1];
+        if (draftId) {
+            const [draftSnap, subSnap] = await Promise.all([
+                db.collection('draft_submissions').doc(draftId).get(),
+                db.collection('onboarding_submissions').doc(draftId).get()
+            ]);
+            if (draftSnap.exists) {
+                const dd = draftSnap.data();
+                if (!dd.ownerUid || dd.ownerUid === uid || dd.linkedUid === uid || dd.activeSessionUid === uid || !dd.isGoogleDraft) isAuthorized = true;
+            }
+            if (!isAuthorized && subSnap.exists) {
+                const sd = subSnap.data();
+                if (sd.uid === uid || sd.linkedUid === uid || sd.ownerUid === uid || sd.activeCorrectionToken) isAuthorized = true;
+            }
+        }
+    } else if (!isAuthorized && cleanPath.startsWith('employees/')) {
+        const empId = cleanPath.split('/')[1];
+        if (empId) {
+            let empDoc = await db.collection('employees').doc(empId).get();
+            if (!empDoc.exists) {
+                const byEmpId = await db.collection('employees').where('employeeId', '==', empId).limit(1).get();
+                if (!byEmpId.empty) empDoc = byEmpId.docs[0];
+                else {
+                    const byPortalId = await db.collection('employees').where('portalId', '==', empId).limit(1).get();
+                    if (!byPortalId.empty) empDoc = byPortalId.docs[0];
+                }
+            }
+            if (empDoc && empDoc.exists) {
+                const ed = empDoc.data();
+                if (ed.linkedUid === uid || ed.uid === uid || ed.portalId === uid || ed.employeeId === uid || empDoc.id === uid) {
+                    isAuthorized = true;
+                }
+            }
         }
     }
 

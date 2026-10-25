@@ -242,17 +242,23 @@ service cloud.firestore {
       allow list: if isAdmin() || (isAuthenticated() && (resource.data.ownerUid == request.auth.uid || (resource.data.ownerEmail != null && resource.data.ownerEmail == request.auth.token.email)));
       // Anyone authenticated can create their draft by recovery code ID
       allow create: if isAuthenticated();
-      // Updates allowed if admin, original owner, matching Google email, or guest draft accessed via recovery code
+      // Updates allowed if admin, original owner, matching Google email, or matching active session
       allow update: if isAdmin() || (isAuthenticated() && (
         resource.data.ownerUid == request.auth.uid || 
         (resource.data.get('ownerEmail', '') != '' && resource.data.ownerEmail == request.auth.token.get('email', '')) ||
-        resource.data.get('isGoogleDraft', false) == false
+        (resource.data.get('isGoogleDraft', false) == false && (
+          resource.data.get('activeSessionUid', '') == request.auth.uid ||
+          resource.data.get('ownerUid', '') == request.auth.uid
+        ))
       ));
-      // Deletions allowed for admin, original owner, matching Google email, or guest draft accessed via recovery code
+      // Deletions allowed for admin, original owner, matching Google email, or matching active session
       allow delete: if isAdmin() || (isAuthenticated() && (
         resource.data.ownerUid == request.auth.uid || 
         (resource.data.get('ownerEmail', '') != '' && resource.data.ownerEmail == request.auth.token.get('email', '')) ||
-        resource.data.get('isGoogleDraft', false) == false
+        (resource.data.get('isGoogleDraft', false) == false && (
+          resource.data.get('activeSessionUid', '') == request.auth.uid ||
+          resource.data.get('ownerUid', '') == request.auth.uid
+        ))
       ));
     }
 
@@ -401,7 +407,8 @@ service cloud.firestore {
       allow create: if isRegisteredUser() && (
         isAdmin() || request.resource.data.actorId == request.auth.uid
       );
-      allow update, delete: if isSuperAdmin();
+      allow update: if false;
+      allow delete: if isSuperAdmin();
     }
 
     // ─── Roles ───────────────────────────────────────────────────────────────
