@@ -146,8 +146,8 @@ service cloud.firestore {
         (docId == 'portal_config' && (hasPermission('MANAGE_SYSTEM') || hasPermission('MANAGE_WORKFLOWS') || hasPermission('BGV_CONFIGURE_FIELDS'))) ||
         (docId == 'leave_policy' && (hasPermission('MANAGE_LEAVE_TYPES') || hasPermission('LEAVES_APPROVE'))) ||
         (docId == 'editable_fields' && (hasPermission('MANAGE_SYSTEM') || hasPermission('MANAGE_WORKFLOWS'))) ||
-        (docId == 'gamification_rules' && hasPermission('MANAGE_SYSTEM')) ||
-        (docId == 'legacy_claim_config' && hasPermission('MANAGE_SYSTEM')) ||
+        (docId == 'gamification_rules' && (hasPermission('MANAGE_SYSTEM') || hasPermission('GAMIFICATION_MANAGE'))) ||
+        (docId == 'legacy_claim_config' && (hasPermission('MANAGE_SYSTEM') || hasPermission('EMPLOYEES_IMPORT'))) ||
         (docId == 'public_stats' && (isSuperAdmin() || isAdmin() || hasPermission('MANAGE_SYSTEM')));
     }
 
@@ -160,22 +160,19 @@ service cloud.firestore {
 
     // ─── Admin / Super-Admin Accounts ───────────────────────────────────────
     match /users/{userId} {
-      allow get: if isAuthenticated() && (request.auth.uid == userId || isAdmin() || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', '')));
-      allow list: if isAdmin() || (isAuthenticated() && request.auth.token.get('email', '') != '');
+      allow get, list: if isAuthenticated() && (request.auth.uid == userId || isAdmin() || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', '')));
       allow write: if isSuperAdmin();
     }
 
     // ─── Staff Accounts ─────────────────────────────────────────────────────
     match /staff_accounts/{userId} {
-      allow get: if isAuthenticated() && (request.auth.uid == userId || isAdmin() || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', '')));
-      allow list: if isAdmin() || (isAuthenticated() && request.auth.token.get('email', '') != '');
+      allow get, list: if isAuthenticated() && (request.auth.uid == userId || isAdmin() || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', '')));
       allow update: if isSuperAdmin() || (isAuthenticated() && (request.auth.uid == userId || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', ''))) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['profilePhotoURL', 'updatedAt', 'lastUpdated']));
       allow create, delete: if isSuperAdmin();
     }
 
     match /staff/{userId} {
-      allow get: if isAuthenticated() && (request.auth.uid == userId || isAdmin() || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', '')));
-      allow list: if isAdmin() || (isAuthenticated() && request.auth.token.get('email', '') != '');
+      allow get, list: if isAuthenticated() && (request.auth.uid == userId || isAdmin() || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', '')));
       allow update: if isSuperAdmin() || (isAuthenticated() && (request.auth.uid == userId || (request.auth.token.get('email', '') != '' && request.auth.token.email == resource.data.get('email', ''))) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['profilePhotoURL', 'updatedAt', 'lastUpdated']));
       allow create, delete: if isSuperAdmin();
     }
@@ -367,7 +364,8 @@ service cloud.firestore {
                        isOwnerOfPortalId(resource.data.employeeId) ||
                        (resource.data.get('portalId', '') != '' && isOwnerOfPortalId(resource.data.portalId))
                      ));
-      allow write: if hasPermission('DISCIPLINE_MANAGE') || hasPermission('DISCIPLINE_CREATE') || isSuperAdmin();
+      allow create, update: if hasPermission('DISCIPLINE_MANAGE') || hasPermission('DISCIPLINE_CREATE') || hasPermission('DISCIPLINE_ISSUE') || isSuperAdmin();
+      allow delete: if hasPermission('DISCIPLINE_MANAGE') || hasPermission('DISCIPLINE_DELETE') || isSuperAdmin();
     }
 
     // ─── Legacy Employee Imports ─────────────────────────────────────────────

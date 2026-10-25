@@ -3184,15 +3184,34 @@ exports.setAdminClaims = functions.https.onCall(async (request) => {
     const db = admin.firestore();
 
     try {
-        // Look up the user in staff_accounts first, then users (super-admins)
-        const [staffAccSnap, userSnap] = await Promise.all([
+        // Look up the user in staff_accounts, users, and legacy staff by UID first, then by email fallback
+        const [staffAccSnap, userSnap, legacyStaffSnap] = await Promise.all([
             db.collection('staff_accounts').doc(uid).get(),
-            db.collection('users').doc(uid).get()
+            db.collection('users').doc(uid).get(),
+            db.collection('staff').doc(uid).get()
         ]);
 
-        const staffDoc = staffAccSnap.exists ? staffAccSnap.data() : null;
-        const userDoc = userSnap.exists ? userSnap.data() : null;
-        const doc = staffDoc || userDoc;
+        let resolvedDocId = uid;
+        let staffDoc = staffAccSnap.exists ? staffAccSnap.data() : (legacyStaffSnap.exists ? legacyStaffSnap.data() : null);
+        let userDoc = userSnap.exists ? userSnap.data() : null;
+        let doc = staffDoc || userDoc;
+
+        if (!doc) {
+            const authUser = await admin.auth().getUser(uid).catch(() => null);
+            const email = authUser && authUser.email ? authUser.email.trim() : '';
+            if (email) {
+                for (const colName of ['staff_accounts', 'users', 'staff']) {
+                    const qSnap = await db.collection(colName).where('email', '==', email).limit(1).get();
+                    if (!qSnap.empty) {
+                        resolvedDocId = qSnap.docs[0].id;
+                        doc = qSnap.docs[0].data();
+                        if (colName === 'users') userDoc = doc;
+                        else staffDoc = doc;
+                        break;
+                    }
+                }
+            }
+        }
 
         if (!doc) {
             // Not an admin — clear any stale claims
@@ -3216,9 +3235,11 @@ exports.setAdminClaims = functions.https.onCall(async (request) => {
             if (sitesSnap.exists) {
                 const data = sitesSnap.data() || {};
                 const list = Array.isArray(data.sites) ? data.sites : (Array.isArray(data.sitesList) ? data.sitesList : []);
+                const adminIdentifiers = new Set([uid, resolvedDocId, doc.id, doc.username, doc.employeeId].filter(Boolean));
                 for (const s of list) {
                     if (!s || !s.id) continue;
-                    if (s.supervisorId === uid || (Array.isArray(s.supervisorIds) && s.supervisorIds.includes(uid))) {
+                    const supIds = Array.isArray(s.supervisorIds) ? s.supervisorIds : [];
+                    if (adminIdentifiers.has(s.supervisorId) || supIds.some(id => adminIdentifiers.has(id))) {
                         sitesManagedSet.add(s.id);
                     }
                 }
