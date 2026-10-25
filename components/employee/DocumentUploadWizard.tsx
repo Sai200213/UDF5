@@ -39,7 +39,11 @@ const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
     const detailFieldsBySection = useMemo(() => {
         return formSections.map(section => ({
             ...section,
-            fields: section.fields.filter(f => f.type !== FieldType.FILE_UPLOAD)
+            fields: section.fields.filter(f => 
+                f.type !== FieldType.FILE_UPLOAD &&
+                f.type !== FieldType.HEADER &&
+                f.type !== FieldType.INFO_TEXT
+            )
         })).filter(section => section.fields.length > 0);
     }, [formSections]);
 
@@ -115,7 +119,11 @@ const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
         
         formSections.forEach(section => {
             section.fields.forEach(field => {
-                if (field.type === FieldType.FILE_UPLOAD) return;
+                if (
+                    field.type === FieldType.FILE_UPLOAD ||
+                    field.type === FieldType.HEADER ||
+                    field.type === FieldType.INFO_TEXT
+                ) return;
 
                 const val = formData[field.id];
                 const isEmpty = val === undefined || val === null || String(val).trim() === '';
@@ -254,6 +262,57 @@ const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                                                     onChange={(e) => handleFieldChange(field.id, e.target.value)}
                                                     className={`w-full border rounded-xl p-2.5 text-sm transition-all focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600 ${error ? 'border-red-500' : 'border-gray-200'}`}
                                                 />
+                                            ) : field.type === FieldType.RADIO ? (
+                                                <div className="flex flex-wrap gap-2.5 mt-1">
+                                                    {field.options?.map(opt => (
+                                                        <label key={opt} className={`flex items-center space-x-2 px-3 py-2 rounded-xl border text-sm cursor-pointer transition-all ${formData[field.id] === opt ? 'border-emerald-600 bg-emerald-50 text-emerald-900 font-medium shadow-xs' : 'border-gray-200 bg-white hover:bg-gray-50 text-gray-700'}`}>
+                                                            <input
+                                                                type="radio"
+                                                                name={field.id}
+                                                                value={opt}
+                                                                checked={formData[field.id] === opt}
+                                                                onChange={() => handleFieldChange(field.id, opt)}
+                                                                className="text-emerald-600 focus:ring-emerald-500 h-4 w-4"
+                                                            />
+                                                            <span>{opt}</span>
+                                                        </label>
+                                                    ))}
+                                                </div>
+                                            ) : field.type === FieldType.CHECKBOX ? (
+                                                <div className="flex flex-wrap gap-2.5 mt-1">
+                                                    {field.options && field.options.length > 0 ? (
+                                                        field.options.map(opt => {
+                                                            const currentArr = Array.isArray(formData[field.id]) ? formData[field.id] : (formData[field.id] ? [formData[field.id]] : []);
+                                                            const isChecked = currentArr.includes(opt);
+                                                            return (
+                                                                <label key={opt} className={`flex items-center space-x-2 px-3 py-2 rounded-xl border text-sm cursor-pointer transition-all ${isChecked ? 'border-emerald-600 bg-emerald-50 text-emerald-900 font-medium shadow-xs' : 'border-gray-200 bg-white hover:bg-gray-50 text-gray-700'}`}>
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={isChecked}
+                                                                        onChange={(e) => {
+                                                                            const updated = e.target.checked
+                                                                                ? [...currentArr, opt]
+                                                                                : currentArr.filter((item: string) => item !== opt);
+                                                                            handleFieldChange(field.id, updated);
+                                                                        }}
+                                                                        className="rounded text-emerald-600 focus:ring-emerald-500 h-4 w-4"
+                                                                    />
+                                                                    <span>{opt}</span>
+                                                                </label>
+                                                            );
+                                                        })
+                                                    ) : (
+                                                        <label className="flex items-center space-x-2 cursor-pointer p-2 rounded-xl border border-gray-200 hover:bg-gray-50">
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={!!formData[field.id]}
+                                                                onChange={(e) => handleFieldChange(field.id, e.target.checked)}
+                                                                className="rounded text-emerald-600 focus:ring-emerald-500 h-4 w-4"
+                                                            />
+                                                            <span className="text-sm text-gray-700">{field.placeholder || 'Yes / Agree'}</span>
+                                                        </label>
+                                                    )}
+                                                </div>
                                             ) : (
                                                 <input
                                                     type={field.allowedPattern === 'numbers' ? 'number' : 'text'}
@@ -368,12 +427,18 @@ const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                             <div key={section.id} className="border-b border-gray-200/60 last:border-none pb-4 last:pb-0">
                                 <h3 className="text-xs font-bold text-emerald-800 uppercase tracking-widest mb-3">{section.title}</h3>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-sm">
-                                    {section.fields.map(field => {
+                                     {section.fields
+                                        .filter(f => f.type !== FieldType.HEADER && f.type !== FieldType.INFO_TEXT)
+                                        .map(field => {
                                         const val = formData[field.id];
                                         let displayVal = val;
                                         
                                         if (field.type === FieldType.FILE_UPLOAD) {
                                             displayVal = val ? '📄 Uploaded' : '❌ Missing';
+                                        } else if (Array.isArray(val)) {
+                                            displayVal = val.length > 0 ? val.join(', ') : '—';
+                                        } else if (typeof val === 'boolean') {
+                                            displayVal = val ? 'Yes' : 'No';
                                         } else if (!val || String(val).trim() === '') {
                                             displayVal = '—';
                                         }

@@ -89,6 +89,7 @@ const ProfileClaimPage: React.FC = () => {
                 employeeName: data.employeeName,
                 submissionId: data.submissionId,
                 legacyData: data.legacyData,
+                legacyImportId: (data as any)?.legacyImportId || (data as any)?.id || employeeId.trim(),
             }));
 
             // Brief delay to show success, then redirect to join form

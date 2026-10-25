@@ -2139,7 +2139,7 @@ const EmployeeFormPage: React.FC<EmployeeFormPageProps> = ({ sections, isLoading
       ...(refToPass ? { __referralInviteId: refToPass } : {}),
       ...(draftIdToPass ? { draftId: draftIdToPass } : {})
     };
-    const result = await onFormSubmit(submissionData, sections, linkedUid || undefined, onProgress, legacyClaim?.employeeId, hashedPasswordToPass);
+    const result = await onFormSubmit(submissionData, sections, linkedUid || undefined, onProgress, (legacyClaim as any)?.legacyImportId || (legacyClaim as any)?.id || legacyClaim?.employeeId, hashedPasswordToPass);
 
     if (result.success) {
       // Brief pause so user can see the final "done" state

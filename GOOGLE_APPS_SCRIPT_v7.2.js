@@ -13,7 +13,8 @@ var FOLDERS = {
     PENDING: 'Pending Employees',
     ACTIVE: 'Active Employees',
     RELIEVED: 'Relieved Employees',
-    RECYCLE_BIN: 'Recycle Bin'
+    RECYCLE_BIN: 'Recycle Bin',
+    BLOCKED: 'Blocked Employees'
 };
 
 function checkFirestoreAccess(idToken, collection, docId) {
@@ -98,11 +99,16 @@ function doPost(e) {
     // 🛡️ SECURITY: Verify SuperAdmin status for administrative directory actions
     var adminActions = [
       'copy_folder_contents',
+      'copy_specific_subfolders',
+      'create_employee_folder',
+      'sync_folder',
       'rename_employee_folder',
       'approve_employee',
       'delete_employee',
       'restore_employee',
-      'permanent_delete_employee'
+      'permanent_delete_employee',
+      'block_employee',
+      'unblock_employee'
     ];
     
     var isAdministrative = adminActions.indexOf(data.action) !== -1;
@@ -114,13 +120,18 @@ function doPost(e) {
     // 👉 Updated to pass email to submitToForm
     if (data.action === 'submit_to_form') return submitToForm(data.fields, data.email);
     if (data.action === 'copy_folder_contents') return handleCopyFolder(data.sourceFolderName, data.targetFolderName);
+    if (data.action === 'copy_specific_subfolders') return handleCopySpecificSubfolders(data.sourceFolderName, data.targetFolderName, data.foldersToCopy);
+    if (data.action === 'create_employee_folder') return handleCreateEmployeeFolder(data.employeeName, data.uniqueId);
+    if (data.action === 'sync_folder') return handleSyncFolder(data.employeeName, data.uniqueId, data.folderName);
     if (data.action === 'rename_employee_folder') return renameFolder(data.oldFolderName, data.newFolderName);
     if (data.action === 'approve_employee') return approveEmployee(data.oldFolderName, data.newFolderName);
     
-    // --- DELETION ACTIONS ---
+    // --- DELETION & BLOCK ACTIONS ---
     if (data.action === 'delete_employee') return moveFolderAction(data.employeeName, data.uniqueId, FOLDERS.RECYCLE_BIN, data.folderName);
     if (data.action === 'restore_employee') return moveFolderAction(data.employeeName, data.uniqueId, FOLDERS.PENDING, data.folderName);
     if (data.action === 'permanent_delete_employee') return permanentDeleteAction(data.employeeName, data.uniqueId, data.folderName);
+    if (data.action === 'block_employee') return moveFolderAction(data.employeeName, data.uniqueId, FOLDERS.BLOCKED, data.folderName);
+    if (data.action === 'unblock_employee') return moveFolderAction(data.employeeName, data.uniqueId, FOLDERS.ACTIVE, data.folderName);
     
     if (data.base64) {
       // 🛡️ SECURITY: Verify folder ownership for non-super-admins
@@ -148,7 +159,7 @@ function doPost(e) {
 
 function handleUpload(data) {
   var root = DriveApp.getFolderById(ROOT_FOLDER_ID);
-  var isPending = data.uniqueId && data.uniqueId.startsWith('SUB-');
+  var isPending = data.uniqueId && (data.uniqueId.startsWith('SUB-') || data.uniqueId.startsWith('UDF-'));
   var targetParent = getOrCreateFolder(root, isPending ? FOLDERS.PENDING : FOLDERS.ACTIVE);
   
   var folderName = data.uniqueId ? (data.uniqueId + " - " + data.employeeName) : data.employeeName;
@@ -349,4 +360,92 @@ function permanentDeleteAction(name, id, specificFolderName) {
   } catch (e) { return reply({ success: false, error: e.toString() }); }
 }
 
-function handleCopyFolder(s, t) { return reply({success: true, message: "Action logged"}); }
+function handleCreateEmployeeFolder(employeeName, uniqueId) {
+  try {
+    var root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+    var isPending = uniqueId && (uniqueId.startsWith('SUB-') || uniqueId.startsWith('UDF-'));
+    var targetParent = getOrCreateFolder(root, isPending ? FOLDERS.PENDING : FOLDERS.ACTIVE);
+    var folderName = uniqueId ? (uniqueId + " - " + employeeName) : employeeName;
+    var employeeFolder = getOrCreateFolder(targetParent, folderName);
+    return reply({ success: true, folderName: folderName, folderUrl: employeeFolder.getUrl(), folderId: employeeFolder.getId() });
+  } catch (e) {
+    return reply({ success: false, error: e.toString() });
+  }
+}
+
+function handleSyncFolder(employeeName, uniqueId, currentFolder) {
+  try {
+    var root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+    var targetName = currentFolder || (uniqueId ? (uniqueId + " - " + employeeName) : employeeName);
+    var folders = DriveApp.getFoldersByName(targetName);
+    if (folders.hasNext()) {
+      var folder = folders.next();
+      return reply({ success: true, folderName: folder.getName(), folderUrl: folder.getUrl(), folderId: folder.getId() });
+    }
+    return handleCreateEmployeeFolder(employeeName, uniqueId);
+  } catch (e) {
+    return reply({ success: false, error: e.toString() });
+  }
+}
+
+function handleCopyFolder(sourceFolderName, targetFolderName) {
+  try {
+    var srcFolders = DriveApp.getFoldersByName(sourceFolderName);
+    if (!srcFolders.hasNext()) return reply({ success: false, error: "Source folder not found: " + sourceFolderName });
+    var srcFolder = srcFolders.next();
+
+    var dstFolders = DriveApp.getFoldersByName(targetFolderName);
+    var dstFolder;
+    if (dstFolders.hasNext()) {
+      dstFolder = dstFolders.next();
+    } else {
+      var root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+      dstFolder = root.createFolder(targetFolderName);
+    }
+
+    copyAllContents(srcFolder, dstFolder);
+    return reply({ success: true, message: "Folder contents copied successfully", targetUrl: dstFolder.getUrl() });
+  } catch (e) {
+    return reply({ success: false, error: e.toString() });
+  }
+}
+
+function handleCopySpecificSubfolders(sourceFolderName, targetFolderName, foldersToCopy) {
+  try {
+    var srcFolders = DriveApp.getFoldersByName(sourceFolderName);
+    if (!srcFolders.hasNext()) return reply({ success: false, error: "Source folder not found: " + sourceFolderName });
+    var srcFolder = srcFolders.next();
+
+    var dstFolders = DriveApp.getFoldersByName(targetFolderName);
+    if (!dstFolders.hasNext()) return reply({ success: false, error: "Target folder not found: " + targetFolderName });
+    var dstFolder = dstFolders.next();
+
+    var subList = Array.isArray(foldersToCopy) ? foldersToCopy : [];
+    for (var i = 0; i < subList.length; i++) {
+      var subName = subList[i];
+      var matchingSubs = srcFolder.getFoldersByName(subName);
+      if (matchingSubs.hasNext()) {
+        var subSrc = matchingSubs.next();
+        var subDst = getOrCreateFolder(dstFolder, subName);
+        copyAllContents(subSrc, subDst);
+      }
+    }
+    return reply({ success: true, message: "Specific subfolders copied successfully" });
+  } catch (e) {
+    return reply({ success: false, error: e.toString() });
+  }
+}
+
+function copyAllContents(source, target) {
+  var files = source.getFiles();
+  while (files.hasNext()) {
+    var file = files.next();
+    file.makeCopy(file.getName(), target);
+  }
+  var subfolders = source.getFolders();
+  while (subfolders.hasNext()) {
+    var subfolder = subfolders.next();
+    var targetSubfolder = getOrCreateFolder(target, subfolder.getName());
+    copyAllContents(subfolder, targetSubfolder);
+  }
+}

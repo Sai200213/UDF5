@@ -97,11 +97,6 @@ export async function restoreFromRecycleBin(recycleBinItemId: string): Promise<{
 
         await updateDoc(sitesDocRef, { sites: updatedSites });
 
-        // Also restore to standalone sites collection if it exists
-        try {
-          await setDoc(doc(db, 'sites', originalId), restoredSite, { merge: true });
-        } catch (_) {}
-
         // Restore any linked vacancies that were archived with this site
         if (binItem.metadata?.linkedVacancies && Array.isArray(binItem.metadata.linkedVacancies)) {
           for (const vac of binItem.metadata.linkedVacancies) {

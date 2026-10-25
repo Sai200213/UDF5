@@ -412,7 +412,7 @@ export const createRewardRedemption = async (
         }
 
         const newPoints = currentPoints - pointsSpent;
-        await updateDoc(streakRef, { points: newPoints });
+        await setDoc(streakRef, { points: newPoints }, { merge: true });
 
         await addDoc(collection(db, 'reward_redemptions'), {
             userId,

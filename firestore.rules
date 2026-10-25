@@ -513,13 +513,15 @@ service cloud.firestore {
     // ─── Engagement, Attendance, and Complaints ──────────────────────────────
     match /user_engagement/{id} {
       allow read: if isAuthenticated() && (isOwnerOfPortalId(id) || isAdmin());
-      // Allow initializing streak with initial points <= 50, referralCount strictly 0
+      // Allow initializing streak with initial points >= 0 and <= 50, referralCount strictly 0
       allow create: if isAuthenticated() && (isOwnerOfPortalId(id) || isAdmin()) && 
+                    request.resource.data.get('points', 0) >= 0 &&
                     request.resource.data.get('points', 0) <= 50 && 
                     request.resource.data.get('referralCount', 0) == 0;
-      // Allow updating streak: points can only increment by at most 50 per action, referralCount cannot be modified by client
+      // Allow updating streak: points must be >= 0, can only increment by at most 50 per action, referralCount cannot be modified by client
       allow update: if isAuthenticated() && (isOwnerOfPortalId(id) || isAdmin()) && (
         !request.resource.data.diff(resource.data).affectedKeys().hasAny(['referralCount']) &&
+        request.resource.data.get('points', 0) >= 0 &&
         request.resource.data.get('points', 0) <= resource.data.get('points', 0) + 50
       );
       allow delete: if isAdmin();

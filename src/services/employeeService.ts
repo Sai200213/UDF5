@@ -1905,16 +1905,24 @@ export const updateSubmissionStatus = async (
             // ============================================================
             if (data.legacyImportId) {
                 try {
-                    const legacyRef = doc(db, 'legacy_employee_imports', data.legacyImportId);
-                    const legacySnap = await getDoc(legacyRef);
+                    let targetLegacyRef = doc(db, 'legacy_employee_imports', data.legacyImportId);
+                    let legacySnap = await getDoc(targetLegacyRef);
+                    if (!legacySnap.exists()) {
+                        const qLegacy = query(collection(db, 'legacy_employee_imports'), where('employeeId', '==', data.legacyImportId));
+                        const snapQ = await getDocs(qLegacy);
+                        if (!snapQ.empty) {
+                            targetLegacyRef = doc(db, 'legacy_employee_imports', snapQ.docs[0].id);
+                            legacySnap = snapQ.docs[0];
+                        }
+                    }
                     if (legacySnap.exists()) {
-                        approvalBatch.update(legacyRef, { 
+                        approvalBatch.update(targetLegacyRef, { 
                             status: 'Finalized',
                             finalEmployeeId: empId,
                             linkedUid: data.linkedUid || '',
                             finalizedAt: new Date().toISOString()
                         });
-                        log.log(`[LEGACY_HOOK] Finalized legacy record ${data.legacyImportId} for employee ${empId}`);
+                        log.log(`[LEGACY_HOOK] Finalized legacy record ${targetLegacyRef.id} for employee ${empId}`);
                     }
                 } catch (legacyErr) {
                     console.error("[LEGACY_HOOK_ERROR] Failed to finalize legacy record:", legacyErr);

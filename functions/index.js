@@ -2520,6 +2520,8 @@ exports.claimEmployeeProfile = functions.https.onCall(async (request) => {
 
         return {
             success: true,
+            id: legacyDoc.id,
+            legacyImportId: legacyDoc.id,
             token: customToken,
             submissionId: submissionId,
             employeeName: legacyData.fullName || '',

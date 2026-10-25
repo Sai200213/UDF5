@@ -1,7 +1,7 @@
 import { Site, FormSection, SubmissionStatus, FieldType, FormField } from '../../types';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../firebase/config';
-import { collection, doc, setDoc, writeBatch, serverTimestamp, getDocs, query, where } from 'firebase/firestore';
+import { collection, doc, getDoc, setDoc, writeBatch, serverTimestamp, getDocs, query, where } from 'firebase/firestore';
 import { resolveLocation, validateBulkImportLocations } from './subUnitUtils';
 import { hashPassword } from './cryptoUtils';
 import * as XLSX from 'xlsx';
@@ -616,6 +616,7 @@ export const checkForDatabaseDuplicates = async (
     for (const snap of empSnaps) {
         snap.docs.forEach((docSnap: any) => {
             const d = docSnap.data();
+            if (d.deletedAt || d.isDeleted || d.status === 'Rejected') return;
             const empId = String(d.employeeId || "").trim();
             if (empId) empById.set(empId, docSnap.id);
 
@@ -634,6 +635,7 @@ export const checkForDatabaseDuplicates = async (
     for (const snap of subSnaps) {
         snap.docs.forEach((docSnap: any) => {
             const d = docSnap.data();
+            if (d.deletedAt || d.isDeleted || d.status === 'Rejected') return;
             const empId = String(d.employeeId || "").trim();
             if (empId) subById.set(empId, docSnap.id);
 
@@ -828,10 +830,27 @@ export const bulkImportEmployees = async (
             let submissionId = `UDF-${year}${month}-${randomStr}`;
 
             // If overwriting an existing record
+            let existingEmpDoc: any = null;
             if (conflict) {
                 submissionId = conflict.existingRecordId;
                 employeeId = conflict.employeeId || employeeId || '';
+                try {
+                    const snap = await getDoc(doc(db, EMPLOYEES_COLLECTION, submissionId));
+                    if (snap.exists()) {
+                        existingEmpDoc = snap.data();
+                    } else if (employeeId) {
+                        const qEmp = query(collection(db, EMPLOYEES_COLLECTION), where('employeeId', '==', employeeId));
+                        const snapQ = await getDocs(qEmp);
+                        if (!snapQ.empty) existingEmpDoc = snapQ.docs[0].data();
+                    }
+                } catch (e) {
+                    // Non-blocking fallback
+                }
             }
+
+            const defaultPasswordHash = await hashPassword(generateDefaultPassword(row.fullName, row.dateOfBirth));
+            const finalPasswordHash = existingEmpDoc?.passwordHash || defaultPasswordHash;
+            const finalIsDefaultPassword = existingEmpDoc?.isDefaultPassword !== undefined ? existingEmpDoc.isDefaultPassword : true;
 
             // Build form data
             const formData: Record<string, any> = {};
@@ -887,8 +906,8 @@ export const bulkImportEmployees = async (
                 siteName,
                 subUnitId,
                 subUnitName,
-                passwordHash: await hashPassword(generateDefaultPassword(row.fullName, row.dateOfBirth)),
-                isDefaultPassword: true,
+                passwordHash: finalPasswordHash,
+                isDefaultPassword: finalIsDefaultPassword,
                 needsProfileCompletion: importMode === 'pending_profile',
                 profileStatus: importMode === 'pending_profile' ? 'waiting_for_employee' : 'approved',
                 approvalHistory: [{
@@ -942,12 +961,14 @@ export const bulkImportEmployees = async (
                         }
                     },
                     activeAssignments: [assignment],
-                    assignmentHistory: [assignment],
-                    assignedSiteIds: [siteId],
-                    createdAt: new Date().toISOString(),
+                    assignmentHistory: (existingEmpDoc?.assignmentHistory && Array.isArray(existingEmpDoc.assignmentHistory) && existingEmpDoc.assignmentHistory.length > 0)
+                        ? [...existingEmpDoc.assignmentHistory, assignment]
+                        : [assignment],
+                    assignedSiteIds: Array.from(new Set([...(existingEmpDoc?.assignedSiteIds || []), siteId])),
+                    createdAt: existingEmpDoc?.createdAt || new Date().toISOString(),
                     importedVia: importMode === 'pending_profile' ? 'pending_profile_import' : 'bulk_upload',
-                    passwordHash: await hashPassword(generateDefaultPassword(row.fullName, row.dateOfBirth)),
-                    isDefaultPassword: true
+                    passwordHash: finalPasswordHash,
+                    isDefaultPassword: finalIsDefaultPassword
                 };
 
                 batch.set(employeeRef, employeeData, { merge: true });

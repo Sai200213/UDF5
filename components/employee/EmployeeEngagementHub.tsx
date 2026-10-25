@@ -1,9 +1,9 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { User, SubmittedFormData } from '../../types';
 import { Flame, HelpCircle, Clock, MessageSquareCode, ClipboardCheck, AlertCircle, Sparkles, Smile, ShieldAlert } from 'lucide-react';
-import { getUserStreak, updateOrCreateStreak, submitComplaint, UserStreak } from '../../src/services/engagementService';
+import { getUserStreak, updateOrCreateStreak, submitComplaint, UserStreak, getLocalDateString } from '../../src/services/engagementService';
 import { db } from '../../src/firebase/config';
-import { collection, getDocs, query, orderBy } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy, doc, getDoc, setDoc } from 'firebase/firestore';
 import AttendanceCalendar from './AttendanceCalendar';
 
 interface EmployeeEngagementHubProps {
@@ -67,6 +67,54 @@ const EmployeeEngagementHub: React.FC<EmployeeEngagementHubProps> = ({ authUser,
             }
         } catch (err) {
             console.error("Failed to load user streak:", err);
+        }
+    };
+
+    useEffect(() => {
+        if (streak) {
+            const today = getLocalDateString();
+            if ((streak as any).lastQuizDate === today) {
+                setQuizSubmitted(true);
+                if ((streak as any).lastQuizOption) {
+                    setQuizAnswer((streak as any).lastQuizOption);
+                }
+            }
+        }
+    }, [streak]);
+
+    const handleQuizSubmit = async (currentQuizObj: any) => {
+        if (!quizAnswer || quizSubmitted || !userId) return;
+        setQuizSubmitted(true);
+        const today = getLocalDateString();
+        const isCorrect = quizAnswer === currentQuizObj.correctAnswer;
+
+        let awardedPoints = 10;
+        try {
+            const rulesRef = doc(db, 'settings', 'gamification_rules');
+            const rulesSnap = await getDoc(rulesRef);
+            if (rulesSnap.exists()) {
+                awardedPoints = rulesSnap.data().quizPoints ?? 10;
+            }
+        } catch (e) {
+            console.error("Failed to fetch gamification rules:", e);
+        }
+
+        const currentPoints = (streak as any)?.points || 0;
+        const newPoints = currentPoints + (isCorrect ? awardedPoints : 0);
+
+        try {
+            const docRef = doc(db, 'user_engagement', userId);
+            const updated = {
+                ...(streak || { userId, userName, streakCount: 1, lastVisitDate: today }),
+                points: newPoints,
+                lastQuizDate: today,
+                lastQuizOption: quizAnswer,
+                lastQuizCorrect: isCorrect
+            };
+            await setDoc(docRef, updated, { merge: true });
+            setStreak(updated as any);
+        } catch (err) {
+            console.error("Failed to update quiz points in Firestore:", err);
         }
     };
 
@@ -258,7 +306,7 @@ const EmployeeEngagementHub: React.FC<EmployeeEngagementHubProps> = ({ authUser,
                                         <button
                                             type="button"
                                             disabled={!quizAnswer}
-                                            onClick={() => setQuizSubmitted(true)}
+                                            onClick={() => handleQuizSubmit(currentQuiz)}
                                             className="w-full bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold py-2.5 rounded-xl text-xs transition-all shadow-xs"
                                         >
                                             Submit Answer
