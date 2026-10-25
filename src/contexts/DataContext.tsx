@@ -244,6 +244,7 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         // Organization-wide roles (HR Manager, Manager, etc.) with ALL scope can see all sites
         const hasAllScope = userRoleObj?.permissions?.includes('EMPLOYEES_VIEW_SCOPE_ALL' as any) ||
                             userRoleObj?.permissions?.includes('SUBMISSIONS_VIEW_SCOPE_ALL' as any) ||
+                            userRoleObj?.permissions?.includes('MANAGE_SITES' as any) ||
                             userRoleObj?.permissions?.includes('MANAGE_ALL_SITES' as any);
         if (hasAllScope) return undefined;
 

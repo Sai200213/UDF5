@@ -413,6 +413,10 @@ exports.employeeGoogleLogin = functions.https.onCall(async (request) => {
              throw new functions.https.HttpsError('invalid-argument', 'Google token missing email');
         }
 
+        if (ticket.email_verified === false) {
+             throw new functions.https.HttpsError('unauthenticated', 'Google email is not verified.');
+        }
+
         const normalizedEmail = email.toLowerCase().trim();
 
         console.log(`[GOOGLE LOGIN] Attempt for: ${normalizedEmail}`);
@@ -422,8 +426,18 @@ exports.employeeGoogleLogin = functions.https.onCall(async (request) => {
 
         // 1. Try finding by Google UID in onboarding_submissions
         let subSnap = await db.collection('onboarding_submissions')
-            .where('uid', '==', googleUid)
+            .where('linkedUid', '==', googleUid)
             .limit(1).get();
+        if (subSnap.empty) {
+            subSnap = await db.collection('onboarding_submissions')
+                .where('googleUid', '==', googleUid)
+                .limit(1).get();
+        }
+        if (subSnap.empty) {
+            subSnap = await db.collection('onboarding_submissions')
+                .where('uid', '==', googleUid)
+                .limit(1).get();
+        }
         if (subSnap.empty) {
             subSnap = await db.collection('onboarding_submissions')
                 .where('linkedGoogleEmail', '==', normalizedEmail)
@@ -435,8 +449,18 @@ exports.employeeGoogleLogin = functions.https.onCall(async (request) => {
 
         // 2. Try finding by Google UID in employees
         let empSnap = await db.collection('employees')
-            .where('uid', '==', googleUid)
+            .where('linkedUid', '==', googleUid)
             .limit(1).get();
+        if (empSnap.empty) {
+            empSnap = await db.collection('employees')
+                .where('googleUid', '==', googleUid)
+                .limit(1).get();
+        }
+        if (empSnap.empty) {
+            empSnap = await db.collection('employees')
+                .where('uid', '==', googleUid)
+                .limit(1).get();
+        }
         if (empSnap.empty) {
             empSnap = await db.collection('employees')
                 .where('linkedGoogleEmail', '==', normalizedEmail)
@@ -499,27 +523,33 @@ exports.employeeGoogleLogin = functions.https.onCall(async (request) => {
             throw new functions.https.HttpsError('internal', 'Could not resolve Portal ID for the employee.');
         }
 
-        // Auto-link both documents
+        // Auto-link both documents without overwriting the core employee auth UID
         if (submissionDoc) {
             const data = submissionDoc.data();
-            if (!data.linkedUid || data.linkedUid === 'none' || data.uid !== googleUid) {
-                await submissionDoc.ref.update({
-                    uid: googleUid,
-                    linkedUid: googleUid,
-                    linkedGoogleEmail: normalizedEmail
-                });
-                console.log(`[GOOGLE LOGIN] Auto-linked UID ${googleUid} to onboarding_submissions/${submissionDoc.id}`);
+            const updates = {};
+            if (data.linkedUid !== googleUid) updates.linkedUid = googleUid;
+            if (data.googleUid !== googleUid) updates.googleUid = googleUid;
+            if (data.linkedGoogleEmail !== normalizedEmail) updates.linkedGoogleEmail = normalizedEmail;
+            // Preserve portalId as uid so it matches customToken auth.currentUser.uid
+            if (!data.uid || data.uid === 'none') updates.uid = portalId;
+
+            if (Object.keys(updates).length > 0) {
+                await submissionDoc.ref.update(updates);
+                console.log(`[GOOGLE LOGIN] Linked Google UID ${googleUid} to onboarding_submissions/${submissionDoc.id}`);
             }
         }
         if (employeeDoc) {
             const data = employeeDoc.data();
-            if (!data.linkedUid || data.linkedUid === 'none' || data.uid !== googleUid) {
-                await employeeDoc.ref.update({
-                    uid: googleUid,
-                    linkedUid: googleUid,
-                    linkedGoogleEmail: normalizedEmail
-                });
-                console.log(`[GOOGLE LOGIN] Auto-linked UID ${googleUid} to employees/${employeeDoc.id}`);
+            const updates = {};
+            if (data.linkedUid !== googleUid) updates.linkedUid = googleUid;
+            if (data.googleUid !== googleUid) updates.googleUid = googleUid;
+            if (data.linkedGoogleEmail !== normalizedEmail) updates.linkedGoogleEmail = normalizedEmail;
+            // Preserve portalId as uid so it matches customToken auth.currentUser.uid
+            if (!data.uid || data.uid === 'none') updates.uid = portalId;
+
+            if (Object.keys(updates).length > 0) {
+                await employeeDoc.ref.update(updates);
+                console.log(`[GOOGLE LOGIN] Linked Google UID ${googleUid} to employees/${employeeDoc.id}`);
             }
         }
 

@@ -44,6 +44,7 @@ service cloud.firestore {
       return isSuperAdmin() ||
              hasPermission('EMPLOYEES_VIEW_SCOPE_ALL') ||
              hasPermission('SUBMISSIONS_VIEW_SCOPE_ALL') ||
+             hasPermission('MANAGE_SITES') ||
              hasPermission('MANAGE_ALL_SITES') ||
              (siteId != null && siteId != '' &&
               request.auth.token.get('sitesManaged', []).hasAny([siteId]));
