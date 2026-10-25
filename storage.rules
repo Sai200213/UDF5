@@ -1,0 +1,47 @@
+rules_version = '2';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Firebase Storage Rules — Minimal / Cloud-First Architecture
+//
+// FILE UPLOADS:  All private uploads go through the getUploadUrl Cloud Function.
+//               The Cloud Function validates ownership (no 2-query limit) and
+//               returns a 15-min signed URL. Client uploads directly to that URL.
+//               Storage rules are NOT involved for private uploads.
+//
+// FILE DOWNLOADS: All private downloads go through the getSecureDocumentURL
+//               Cloud Function, which validates ownership and returns a signed URL.
+//               Storage rules are NOT involved for private downloads.
+//
+// PUBLIC ASSETS: /public/* files are read-only open (logos, banners, blog images).
+//               Writes to public are admin-only via the getUploadUrl Cloud Function.
+//
+// DEFAULT: Everything else is DENIED.
+// ─────────────────────────────────────────────────────────────────────────────
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ── Size & Type Guard ─────────────────────────────────────────────────────
+    // Shared validation used by any rule that allows writes below.
+    // Prevents DoS/billing exploits: max 10MB, images or PDFs only.
+    function isValidUpload() {
+      return request.resource == null ||
+             (request.resource.size < 10 * 1024 * 1024 &&
+              request.resource.contentType.matches('image/.*|application/pdf'));
+    }
+
+    // ── Public Assets (Logos, Banners, Blog Cover Images) ────────────────────
+    // Read is open. Writes are blocked here — handled via Cloud Function only.
+    match /public/{allPaths=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ── Default: Deny Everything ──────────────────────────────────────────────
+    // All private paths (/onboarding, /employees, /users) are handled by
+    // Cloud Functions (getUploadUrl + getSecureDocumentURL). No rules needed.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
