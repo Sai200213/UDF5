@@ -46,7 +46,7 @@ if (typeof window !== 'undefined') {
             (self as any).FIREBASE_APPCHECK_DEBUG_TOKEN = true;
         }
         appCheck = initializeAppCheck(app, {
-            provider: new ReCaptchaEnterpriseProvider('6LebggEuAAAAACif4YKDhm_yKgN03R8eTIqSVYXx'),
+            provider: new ReCaptchaEnterpriseProvider('6LebggEuAAAAACif4YKDHm_yKgN03R8eTlqSVYXx'),
             isTokenAutoRefreshEnabled: true
         });
         log.log('[AppCheck] reCAPTCHA Enterprise App Check initialized successfully');
