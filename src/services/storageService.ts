@@ -230,16 +230,7 @@ export const getSecureURL = async (storagePath: string | any): Promise<string> =
         const result = await getSecureDocFn({ storagePath: resolvedPath });
         if (result.data?.success && result.data?.url) {
             setCachedSignedUrl(resolvedPath, result.data.url);
-            try {
-                const resp = await fetch(result.data.url);
-                if (resp.ok) {
-                    const b = await resp.blob();
-                    return URL.createObjectURL(b);
-                }
-                return result.data.url;
-            } catch {
-                return result.data.url;
-            }
+            return result.data.url;
         }
     } catch (cfError: any) {
         // Fall back to client getBlob if Cloud Function is unavailable

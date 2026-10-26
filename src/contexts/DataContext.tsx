@@ -170,6 +170,8 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             const empLeaves = leaveRequests.filter(r => validIds.includes(r.employeeId) && r.status === 'Approved');
             
             const policyBalances: Record<string, { total: number; used: number }> = {};
+            const hasExplicitBalance: Record<string, boolean> = {};
+
             if (leavePolicy && leavePolicy.leaveTypes) {
                 leavePolicy.leaveTypes.forEach(lt => {
                     const keyMap: Record<string, string> = {
@@ -179,7 +181,9 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
                         'Privilege Leave': 'privilege'
                     };
                     const shortKey = keyMap[lt.label] || lt.typeId.toLowerCase();
-                    const quota = emp.leaveBalance?.[shortKey] !== undefined ? emp.leaveBalance[shortKey] : lt.defaultQuota;
+                    const hasStored = emp.leaveBalance?.[shortKey] !== undefined;
+                    hasExplicitBalance[lt.label] = hasStored;
+                    const quota = hasStored ? emp.leaveBalance[shortKey] : lt.defaultQuota;
 
                     policyBalances[lt.label] = {
                         total: quota,
@@ -207,10 +211,13 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
                 policyBalances[leaveLabel].used += Math.max(0, days);
             });
 
-            // IMPORTANT: Since emp.leaveBalance stores the remaining balance in Firestore,
-            // total entitlement is remaining + used, so that (total - used) in EmployeeLeaveRequestPage correctly equals the remaining balance!
+            // IMP-4: If emp.leaveBalance stored the remaining balance in Firestore,
+            // total entitlement is (remaining + used), so that (total - used) in UI equals remaining.
+            // If emp.leaveBalance was NOT stored, quota is already the total default entitlement.
             Object.keys(policyBalances).forEach(label => {
-                policyBalances[label].total = policyBalances[label].total + policyBalances[label].used;
+                if (hasExplicitBalance[label]) {
+                    policyBalances[label].total = policyBalances[label].total + policyBalances[label].used;
+                }
             });
 
             return {

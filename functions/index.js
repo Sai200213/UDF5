@@ -2570,6 +2570,95 @@ exports.autoDeleteRecycleBin = onSchedule({
     return null;
 });
 
+// Runs every night at 00:30 IST to automatically relieve employees whose notice period has concluded (IMP-9)
+exports.processNoticePeriodExitsCron = onSchedule({
+    schedule: "30 0 * * *",
+    timeZone: "Asia/Kolkata",
+    timeoutSeconds: 300
+}, async (event) => {
+    console.log('[CRON: processNoticePeriodExitsCron] Starting notice period exit check...');
+    const db = admin.firestore();
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    try {
+        const snap = await db.collection('employees')
+            .where('resignationStatus', '==', 'Notice Period')
+            .get();
+
+        if (snap.empty) {
+            console.log('[CRON: processNoticePeriodExitsCron] No employees on Notice Period.');
+            return null;
+        }
+
+        let processedCount = 0;
+        for (const doc of snap.docs) {
+            const data = doc.data();
+            const relievingDate = data.pendingRelievingDate || data.relievingDate;
+            if (!relievingDate) continue;
+
+            const relDateStr = relievingDate.split('T')[0];
+            if (relDateStr <= todayStr) {
+                console.log(`[CRON: processNoticePeriodExitsCron] Notice period completed for ${data.applicantName || doc.id} (Relieving Date: ${relDateStr}). Relieving...`);
+
+                const batch = db.batch();
+                batch.update(doc.ref, {
+                    isActive: false,
+                    status: 'Relieved',
+                    isRelieved: true,
+                    resignationStatus: 'Relieved',
+                    relievingDate: relDateStr,
+                    relievingReason: data.relievingReason || 'Notice Period Completed',
+                    relievingRemarks: 'Automated midnight exit upon notice period completion',
+                    relievedAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+
+                // Sync to onboarding_submissions
+                const subSnap = await resolveSubmissionDocAdmin(db, data.employeeId, doc.id);
+                if (subSnap && subSnap.exists) {
+                    batch.update(subSnap.ref, {
+                        isActive: false,
+                        status: 'Relieved',
+                        isRelieved: true,
+                        relievingDate: relDateStr,
+                        relievingReason: data.relievingReason || 'Notice Period Completed',
+                        relievingRemarks: 'Automated midnight exit upon notice period completion'
+                    });
+                }
+
+                // Disable Firebase Auth account
+                const linkedUid = data.linkedUid || data.uid;
+                if (linkedUid && linkedUid !== 'none' && linkedUid.length > 5) {
+                    try {
+                        await admin.auth().updateUser(linkedUid, { disabled: true });
+                    } catch (authErr) {
+                        console.warn(`[CRON: processNoticePeriodExitsCron] Could not disable auth for ${linkedUid}:`, authErr.message);
+                    }
+                }
+
+                // Append audit log
+                const auditRef = db.collection('audit_logs').doc();
+                batch.set(auditRef, {
+                    action: 'RESIGNATION_NOTICE_EXIT',
+                    module: 'RESIGNATIONS',
+                    targetId: doc.id,
+                    actorId: 'system_cron',
+                    actorName: 'System (processNoticePeriodExitsCron)',
+                    details: `Notice period completed on ${relDateStr}. Auto-relieved employee ${data.applicantName || data.employeeId} (${doc.id}).`,
+                    timestamp: admin.firestore.FieldValue.serverTimestamp()
+                });
+
+                await batch.commit();
+                processedCount++;
+            }
+        }
+
+        console.log(`[CRON: processNoticePeriodExitsCron] Successfully auto-relieved ${processedCount} employees.`);
+    } catch (err) {
+        console.error('[CRON: processNoticePeriodExitsCron] Error processing notice period exits:', err);
+    }
+    return null;
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // LEGACY PROFILE CLAIM (AUTOMATED)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3837,7 +3926,8 @@ exports.verifyCorrectionIdentity = functions.https.onCall(async (request) => {
     const crypto = require('crypto');
     const timestamp = Date.now();
     const sessionPayload = `${cleanToken}:${timestamp}:${data.targetId}`;
-    const sessionToken = crypto.createHmac('sha256', 'UDF_CORRECTION_SESSION_KEY_2026_@DELTA').update(sessionPayload).digest('hex') + `.${timestamp}`;
+    const hmacSecret = process.env.CORRECTION_HMAC_SECRET || 'UDF_CORRECTION_SESSION_KEY_2026_@DELTA';
+    const sessionToken = crypto.createHmac('sha256', hmacSecret).update(sessionPayload).digest('hex') + `.${timestamp}`;
 
     // Store active session token on doc for validation
     await docRef.update({
@@ -3915,7 +4005,8 @@ exports.submitCorrectionServer = functions.https.onCall(async (request) => {
         const timestamp = parseInt(tsStr, 10);
         if (tokenHash && !isNaN(timestamp) && (Date.now() - timestamp <= 2 * 60 * 60 * 1000)) {
             const expectedPayload = `${cleanToken}:${timestamp}:${reqData.targetId}`;
-            const expectedHash = crypto.createHmac('sha256', 'UDF_CORRECTION_SESSION_KEY_2026_@DELTA').update(expectedPayload).digest('hex');
+            const hmacSecret = process.env.CORRECTION_HMAC_SECRET || 'UDF_CORRECTION_SESSION_KEY_2026_@DELTA';
+            const expectedHash = crypto.createHmac('sha256', hmacSecret).update(expectedPayload).digest('hex');
             if (tokenHash === expectedHash) {
                 isAuthorized = true;
             }

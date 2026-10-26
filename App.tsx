@@ -65,10 +65,10 @@ import {
   subscribeToStaffUsers, updateStaffUsers
 } from './src/services/adminService';
 import {
-  subscribeToLeaveRequests, submitLeaveRequest, updateLeaveRequest,
-  subscribeToAccountUpdates, submitAccountUpdateRequest, updateAccountUpdateRequest,
-  subscribeToResignationRequests, submitResignationRequest, updateResignationRequest, processDueResignations,
-  subscribeToDisciplinaryActions, addDisciplinaryAction,
+  submitLeaveRequest, updateLeaveRequest,
+  submitAccountUpdateRequest, updateAccountUpdateRequest,
+  submitResignationRequest, updateResignationRequest, processDueResignations,
+  addDisciplinaryAction,
   revertWorkflowRequest
 } from './src/services/requestService';
 import { doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, getDocs, deleteDoc, addDoc, serverTimestamp } from 'firebase/firestore';
@@ -1279,54 +1279,11 @@ const App: React.FC = () => {
         comment: adminComments,
         isBypass
       });
-    } catch (serverErr) {
-      console.warn('[handleAdminLeaveAction] Cloud Function review failed, falling back to client update:', serverErr);
-
-      const config = workflowConfigs.find(c => c.moduleId === 'LEAVES');
-      const maxLevels = config?.levels.length || 1;
-      const historyEntry: ApprovalHistoryEntry = {
-        level: r.currentLevel,
-        actionBy: authUser.name || 'Admin',
-        actionByRole: roles.find(ro => ro.id === authUser.roleId)?.name || 'Admin',
-        timestamp: new Date().toISOString(),
-        status: newStatus,
-        comments: adminComments
-      };
-
-      let updatedRequest = { ...r, approvalHistory: [...r.approvalHistory, historyEntry] };
-
-      if (newStatus === RequestStatus.REJECTED) {
-        updatedRequest.status = RequestStatus.REJECTED;
-        updatedRequest.adminComments = adminComments;
-        await updateLeaveRequest(updatedRequest);
-        logSystemAction('REJECTION', 'LEAVES', `Rejected leave request for ${r.employeeName}.`);
-        sendNotification(r.employeeId, `Your ${r.leaveType} request was rejected.`, 'error', AppView.EMPLOYEE_LEAVE_REQUESTS);
-      } else if (newStatus === RequestStatus.APPROVED) {
-        const site = sites.find(s => s.id === r.siteId);
-        const effectiveLevel = getEffectiveApprovalLevel(r.currentLevel, site, config, staffUsers, roles);
-        const nextRawLevel = effectiveLevel + 1;
-
-        if (nextRawLevel <= maxLevels && !isBypass) {
-          const nextEffective = getEffectiveApprovalLevel(nextRawLevel, site, config, staffUsers, roles);
-          updatedRequest.currentLevel = nextEffective;
-          await updateLeaveRequest(updatedRequest);
-          logSystemAction('APPROVAL', 'LEAVES', `Approved leave level ${effectiveLevel} (Pending Level ${nextEffective}).`);
-          sendNotification(r.employeeId, `Your ${r.leaveType} request was approved at Level ${effectiveLevel}.`, 'info', AppView.EMPLOYEE_LEAVE_REQUESTS);
-
-          const nextLevelConfig = config?.levels.find(l => l.level === nextEffective);
-          if (nextLevelConfig) notifyApprovers(r.employeeId, nextLevelConfig.roleId, `Pending Leave Approval`, AppView.ADMIN_PORTAL_LEAVE_MANAGEMENT);
-        } else {
-          updatedRequest.status = RequestStatus.APPROVED;
-          await updateLeaveRequest(updatedRequest);
-          logSystemAction('APPROVAL', 'LEAVES', `Final approval for ${r.employeeName} leave.`);
-          sendNotification(r.employeeId, `Your ${r.leaveType} request has been fully approved.`, 'success', AppView.EMPLOYEE_LEAVE_REQUESTS);
-
-          const [sY, sM, sD] = r.startDate.split('-').map(Number);
-          const [eY, eM, eD] = r.endDate.split('-').map(Number);
-          const daysTaken = Math.round((Date.UTC(eY, eM - 1, eD) - Date.UTC(sY, sM - 1, sD)) / (1000 * 3600 * 24)) + 1;
-          await updateEmployeeLeaveBalance(r.employeeId, r.leaveType, daysTaken);
-        }
-      }
+    } catch (serverErr: any) {
+      console.error('[handleAdminLeaveAction] Cloud Function review failed:', serverErr);
+      const msg = serverErr?.message || 'Failed to process leave action.';
+      toast.error(msg);
+      throw serverErr;
     }
     refreshGlobalStats();
   }, [leaveRequests, authUser, workflowConfigs, roles, logSystemAction, sendNotification, notifyApprovers, refreshGlobalStats, sites, staffUsers]);
@@ -1374,65 +1331,11 @@ const App: React.FC = () => {
         updatedRelievingDate,
         isBypass
       });
-    } catch (serverErr) {
-      console.warn('[handleAdminResignationAction] Cloud Function review failed, falling back to client update:', serverErr);
-
-      const config = workflowConfigs.find(c => c.moduleId === 'RESIGNATIONS');
-      const maxLevels = config?.levels.length || 1;
-      const historyEntry: ApprovalHistoryEntry = {
-        level: r.currentLevel,
-        actionBy: authUser.name || 'Admin',
-        actionByRole: roles.find(ro => ro.id === authUser.roleId)?.name || 'Admin',
-        timestamp: new Date().toISOString(),
-        status: newStatus,
-        comments: adminComments
-      };
-
-      let updatedRequest = { ...r, approvalHistory: [...r.approvalHistory, historyEntry] };
-      if (updatedRelievingDate) updatedRequest.relievingDate = updatedRelievingDate;
-
-      if (newStatus === RequestStatus.REJECTED) {
-        updatedRequest.status = RequestStatus.REJECTED;
-        updatedRequest.adminComments = adminComments;
-        await updateResignationRequest(updatedRequest);
-        logSystemAction('REJECTION', 'EMPLOYEES', `Rejected resignation for ${r.employeeName}.`);
-        sendNotification(r.employeeId, `Your resignation request was rejected.`, 'error', AppView.EMPLOYEE_RESIGNATION);
-      } else if (newStatus === RequestStatus.APPROVED) {
-        const site = sites.find(s => s.id === r.siteId);
-        const effectiveLevel = getEffectiveApprovalLevel(r.currentLevel, site, config, staffUsers, roles);
-        const nextRawLevel = effectiveLevel + 1;
-
-        if (nextRawLevel <= maxLevels && !isBypass) {
-          const nextEffective = getEffectiveApprovalLevel(nextRawLevel, site, config, staffUsers, roles);
-          updatedRequest.currentLevel = nextEffective;
-          await updateResignationRequest(updatedRequest);
-          logSystemAction('APPROVAL', 'EMPLOYEES', `Approved resignation level ${effectiveLevel} (Pending Level ${nextEffective}).`);
-          sendNotification(r.employeeId, `Resignation approved at Level ${effectiveLevel}.`, 'info', AppView.EMPLOYEE_RESIGNATION);
-
-          const nextLevelConfig = config?.levels.find(l => l.level === nextEffective);
-          if (nextLevelConfig) notifyApprovers(r.employeeId, nextLevelConfig.roleId, `Pending Resignation Review`, AppView.ADMIN_PORTAL_RESIGNATION_MANAGEMENT);
-        } else {
-          updatedRequest.status = RequestStatus.APPROVED;
-
-          const relievingDateObj = new Date(updatedRequest.relievingDate);
-          const today = new Date();
-          today.setHours(23, 59, 59, 999);
-
-          if (relievingDateObj <= today) {
-            await relieveEmployee(r.employeeId, updatedRequest.relievingDate, 'Resignation');
-            updatedRequest.isProcessed = true;
-            logSystemAction('APPROVAL', 'EMPLOYEES', `Final approval & relieved resignation of ${r.employeeName}.`);
-          } else {
-            // Future relieving date: record notice period on employee while keeping them active until relieving date
-            await setEmployeeNoticePeriod(r.employeeId, updatedRequest.relievingDate, updatedRequest.reason || 'Resignation');
-            updatedRequest.isProcessed = false;
-            logSystemAction('APPROVAL', 'EMPLOYEES', `Final approval for resignation of ${r.employeeName}. Notice serving until ${new Date(updatedRequest.relievingDate).toLocaleDateString()}.`);
-          }
-
-          await updateResignationRequest(updatedRequest);
-          sendNotification(r.employeeId, `Your resignation request has been accepted. Relieving Date: ${new Date(updatedRequest.relievingDate).toLocaleDateString()}`, 'success', AppView.EMPLOYEE_RESIGNATION);
-        }
-      }
+    } catch (serverErr: any) {
+      console.error('[handleAdminResignationAction] Cloud Function review failed:', serverErr);
+      const msg = serverErr?.message || 'Failed to process resignation action.';
+      toast.error(msg);
+      throw serverErr;
     }
     refreshGlobalStats();
   }, [resignationRequests, authUser, workflowConfigs, roles, logSystemAction, sendNotification, notifyApprovers, refreshGlobalStats, sites, staffUsers]);
@@ -1496,54 +1399,11 @@ const App: React.FC = () => {
         comment: adminComments,
         isBypass
       });
-    } catch (serverErr) {
-      console.warn('[handleAdminAccountUpdateAction] Cloud Function review failed, falling back to client update:', serverErr);
-
-      const config = workflowConfigs.find(c => c.moduleId === 'ACCOUNT_UPDATES');
-      const maxLevels = config?.levels.length || 1;
-      const historyEntry: ApprovalHistoryEntry = {
-        level: req.currentLevel,
-        actionBy: authUser.name || 'Admin',
-        actionByRole: roles.find(ro => ro.id === authUser.roleId)?.name || 'Admin',
-        timestamp: new Date().toISOString(),
-        status: newStatus,
-        comments: adminComments
-      };
-
-      let updatedReq = { ...req, approvalHistory: [...req.approvalHistory, historyEntry] };
-
-      if (newStatus === RequestStatus.REJECTED) {
-        updatedReq.status = RequestStatus.REJECTED;
-        updatedReq.adminComments = adminComments;
-        await updateAccountUpdateRequest(updatedReq);
-        logSystemAction('REJECTION', 'EMPLOYEES', `Rejected account update for ${req.employeeName}.`);
-        sendNotification(req.employeeId, `Your update request was rejected.`, 'error', AppView.EMPLOYEE_ACCOUNT_UPDATES);
-      } else if (newStatus === RequestStatus.APPROVED) {
-        const site = sites.find(s => s.id === req.siteId);
-        const effectiveLevel = getEffectiveApprovalLevel(req.currentLevel, site, config, staffUsers, roles);
-        const nextRawLevel = effectiveLevel + 1;
-
-        if (nextRawLevel <= maxLevels && !isBypass) {
-          const nextEffective = getEffectiveApprovalLevel(nextRawLevel, site, config, staffUsers, roles);
-          updatedReq.currentLevel = nextEffective;
-          await updateAccountUpdateRequest(updatedReq);
-          logSystemAction('APPROVAL', 'EMPLOYEES', `Approved update level ${effectiveLevel} (Pending Level ${nextEffective}).`);
-          sendNotification(req.employeeId, `Your update request passed Level ${effectiveLevel}.`, 'info', AppView.EMPLOYEE_ACCOUNT_UPDATES);
-
-          const nextLevelConfig = config?.levels.find(l => l.level === nextEffective);
-          if (nextLevelConfig) notifyApprovers(req.employeeId, nextLevelConfig.roleId, `Pending Account Update`, AppView.ADMIN_PORTAL_ACCOUNT_UPDATE_MANAGEMENT);
-        } else {
-          updatedReq.status = RequestStatus.APPROVED;
-          await updateAccountUpdateRequest(updatedReq);
-          
-          // Commit approved fields to employee profile data
-          const { applyApprovedAccountUpdate } = await import('./src/services/employeeService');
-          await applyApprovedAccountUpdate(req.employeeId, req.fieldId, req.requestedValue);
-
-          logSystemAction('APPROVAL', 'EMPLOYEES', `Final approval for account update (${req.fieldLabel || req.fieldId}).`);
-          sendNotification(req.employeeId, `Your update request for ${req.fieldLabel || 'profile details'} has been approved and applied.`, 'success', AppView.EMPLOYEE_ACCOUNT_UPDATES);
-        }
-      }
+    } catch (serverErr: any) {
+      console.error('[handleAdminAccountUpdateAction] Cloud Function review failed:', serverErr);
+      const msg = serverErr?.message || 'Failed to process account update action.';
+      toast.error(msg);
+      throw serverErr;
     }
     refreshGlobalStats();
   }, [accountUpdateRequests, authUser, workflowConfigs, roles, logSystemAction, sendNotification, notifyApprovers, refreshGlobalStats, sites, staffUsers]);
