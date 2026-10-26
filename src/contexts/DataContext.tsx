@@ -129,6 +129,7 @@ interface DataContextType {
 const DataContext = createContext<DataContextType | undefined>(undefined);
 
 export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+    const { user, loading: authLoading } = useAuth();
     const [submittedForms, setSubmittedForms] = useState<SubmittedFormData[]>([]);
     const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
     const [accountUpdateRequests, setAccountUpdateRequests] = useState<AccountUpdateRequest[]>([]);
@@ -284,8 +285,6 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const setLeaveBalances = useCallback((val: any) => {
         // No-op for backward compatibility
     }, []);
-
-    const { user, loading: authLoading } = useAuth();
 
     const userRoleObj = useMemo(() => {
         if (!user) return undefined;
