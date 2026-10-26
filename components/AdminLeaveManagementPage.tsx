@@ -22,7 +22,7 @@ interface AdminLeaveManagementPageProps {
     isSuperAdmin: boolean;
     workflowConfigs: WorkflowConfig[];
     sites: Site[];
-    submittedForms: SubmittedFormData[];
+    submittedForms?: SubmittedFormData[];
     authUser: User | null;
     leaveBalances: LeaveBalance[];
     leavePolicy: LeavePolicy;
@@ -33,7 +33,7 @@ interface AdminLeaveManagementPageProps {
 }
 
 const AdminLeaveManagementPage: React.FC<AdminLeaveManagementPageProps> = ({
-    leaveRequests, onAction, userRole, isSuperAdmin, workflowConfigs, sites, submittedForms, authUser, leaveBalances, leavePolicy, onUpdateLeavePolicy,
+    leaveRequests, onAction, userRole, isSuperAdmin, workflowConfigs, sites, authUser, leaveBalances, leavePolicy, onUpdateLeavePolicy,
     onRevert, onDelete, allowedSiteIds
 }) => {
     const { staffUsers, roles } = useData();

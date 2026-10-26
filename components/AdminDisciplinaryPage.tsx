@@ -14,7 +14,7 @@ import SecureDocumentLink from '../src/components/common/SecureDocumentLink';
 interface AdminDisciplinaryPageProps {
   disciplinaryActions: DisciplinaryAction[];
   onAddDiscipline: (actionData: Omit<DisciplinaryAction, 'id' | 'filedBy' | 'filedByRoleId'>) => void;
-  submittedForms: SubmittedFormData[];
+  submittedForms?: SubmittedFormData[];
   formSections: FormSection[];
   userRole?: Role;
   isSuperAdmin: boolean;
@@ -25,7 +25,7 @@ interface AdminDisciplinaryPageProps {
 }
 
 const AdminDisciplinaryPage: React.FC<AdminDisciplinaryPageProps> = ({
-  disciplinaryActions, onAddDiscipline, onDeleteDiscipline, submittedForms, formSections, userRole, isSuperAdmin, sites, authUser, allowedSiteIds
+  disciplinaryActions, onAddDiscipline, onDeleteDiscipline, formSections, userRole, isSuperAdmin, sites, authUser, allowedSiteIds
 }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');

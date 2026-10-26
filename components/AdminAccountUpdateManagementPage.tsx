@@ -17,7 +17,7 @@ interface AdminAccountUpdateManagementPageProps {
   isSuperAdmin: boolean;
   workflowConfigs: WorkflowConfig[];
   sites: Site[];
-  submittedForms: SubmittedFormData[];
+  submittedForms?: SubmittedFormData[];
   authUser: User | null;
   onRevert?: (requestId: string, level: number) => void;
   onDelete?: (requestId: string) => void;
@@ -25,7 +25,7 @@ interface AdminAccountUpdateManagementPageProps {
 }
 
 const AdminAccountUpdateManagementPage: React.FC<AdminAccountUpdateManagementPageProps> = ({
-  accountUpdateRequests, onAction, userRole, isSuperAdmin, workflowConfigs, sites, submittedForms, authUser,
+  accountUpdateRequests, onAction, userRole, isSuperAdmin, workflowConfigs, sites, authUser,
   onRevert, onDelete, allowedSiteIds
 }) => {
   const { staffUsers, roles } = useData();

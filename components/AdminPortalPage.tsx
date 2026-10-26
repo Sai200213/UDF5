@@ -496,7 +496,6 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
       case AppView.ADMIN_PORTAL_MASTER_EMPLOYEE_LIST:
         if (!hasPermission(Permission.EMPLOYEES_VIEW)) return accessDenied;
         return <AdminMasterEmployeeListPage
-          submittedForms={submittedForms}
           onDelete={onDeleteSubmission}
           onSoftDelete={onSoftDeleteEmployee} // Fixed: Added missing soft delete prop
           onRestore={onRestoreEmployee}
@@ -661,7 +660,6 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
           isSuperAdmin={isSuperAdmin}
           workflowConfigs={workflowConfigs}
           sites={sites}
-          submittedForms={submittedForms}
           authUser={authUser}
           leaveBalances={leaveBalances}
           leavePolicy={leavePolicy}
@@ -678,7 +676,6 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
           isSuperAdmin={isSuperAdmin}
           workflowConfigs={workflowConfigs}
           sites={sites}
-          submittedForms={submittedForms}
           authUser={authUser}
           onRevert={(id: string, level: number) => onRevertWorkflowRequest('ACCOUNT_UPDATES', id, level)}
           onDelete={(id: string) => onDeleteRequest('ACCOUNT_UPDATES', id)}
@@ -692,7 +689,6 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
           isSuperAdmin={isSuperAdmin}
           workflowConfigs={workflowConfigs}
           sites={sites}
-          submittedForms={submittedForms}
           authUser={authUser}
           onRevert={(id: string, level: number) => onRevertWorkflowRequest('RESIGNATIONS', id, level)}
           onDelete={(id: string) => onDeleteRequest('RESIGNATIONS', id)}
@@ -703,7 +699,6 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
           disciplinaryActions={disciplinaryActions}
           onAddDiscipline={onAddDiscipline}
           onDeleteDiscipline={onDeleteDiscipline}
-          submittedForms={submittedForms}
           formSections={sections}
           userRole={userRole}
           isSuperAdmin={isSuperAdmin}

@@ -1054,8 +1054,13 @@ const App: React.FC = () => {
     let unsubSubmissions = () => { };
 
     if (authUser.type === UserType.ADMIN) {
-      // Subscribe for authenticated admins so cross-tab dependencies (Drafts, Master List, Profile) have data (EDGE-D4C-01)
-      const shouldSubscribe = Boolean(authUser);
+      // Enterprise Segregation: Candidate Onboarding pipeline loads on-demand for candidate views only
+      const shouldSubscribe = 
+        currentView === AppView.ADMIN_PORTAL_SUBMISSION_REVIEW || 
+        currentView === AppView.ADMIN_PORTAL_DRAFTS || 
+        currentView === AppView.ADMIN_PORTAL_SITE_MANAGEMENT || 
+        currentView === AppView.ADMIN_DASHBOARD ||
+        hasSubmissionsSubscribedRef.current;
 
       if (shouldSubscribe) {
         hasSubmissionsSubscribedRef.current = true;

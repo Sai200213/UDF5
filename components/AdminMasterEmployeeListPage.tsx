@@ -18,7 +18,7 @@ import { User as SystemUser } from '../types';
 import { useData } from '../src/contexts/DataContext';
 
 interface AdminMasterEmployeeListPageProps {
-  submittedForms: SubmittedFormData[];
+  submittedForms?: SubmittedFormData[]; // Decoupled: Master List loads independently from employees collection
   sites: Site[];
   userRole?: Role;
   formSections: FormSection[];
@@ -76,7 +76,6 @@ const AdminMasterEmployeeListPage: React.FC<AdminMasterEmployeeListPageProps> = 
 
   // Defensive defaults
   const safeSites = sites || [];
-  const safeForms = submittedForms || [];
   const safeSections = formSections || [];
 
   const [searchTerm, setSearchTerm] = useState('');
