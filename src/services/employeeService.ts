@@ -2097,9 +2097,9 @@ export const subscribeToSubmissions = (callback: (submissions: OnboardingSubmiss
         return () => {};
     }
 
-    let q = query(collection(db, SUBMISSIONS_COLLECTION), limit(500));
+    let q = query(collection(db, SUBMISSIONS_COLLECTION), orderBy("timestamp", "desc"), limit(500));
     if (status) {
-        q = query(collection(db, SUBMISSIONS_COLLECTION), where("status", "==", status), limit(500));
+        q = query(collection(db, SUBMISSIONS_COLLECTION), where("status", "==", status), orderBy("timestamp", "desc"), limit(500));
     }
     // Filter by allowed sites if provided (non-super-admin with assigned sites)
     if (siteIds && siteIds.length > 0) {
@@ -2376,8 +2376,9 @@ export const revertSubmissionWorkflow = async (
         // Move files back in Storage and rename/restore in Drive (Asynchronous background)
         (async () => {
             try {
+                const empId = data.employeeId || submissionId;
                 const joinerUid = data.linkedUid || submissionId;
-                const currentStoragePath = `employees/${submissionId}/joining`;
+                const currentStoragePath = `employees/${empId}`;
                 const targetStoragePath = `onboarding/${joinerUid}`;
                 
                 log.log(`[REVERT_CLEANUP] Reverting Firebase Storage from: "${currentStoragePath}" to "${targetStoragePath}"`);

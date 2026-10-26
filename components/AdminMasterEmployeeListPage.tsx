@@ -437,12 +437,15 @@ const AdminMasterEmployeeListPage: React.FC<AdminMasterEmployeeListPageProps> = 
 
       const searchFieldToUse = searchTerm && /^[0-9A-Za-z-]+$/.test(searchTerm) && /\d/.test(searchTerm) ? 'employeeId' : 'applicantName';
 
+      const selectedSiteObj = safeSites.find(s => s.id === selectedSite || s.name === selectedSite);
+      const siteIdToQuery = selectedSiteObj ? selectedSiteObj.id : selectedSite;
+
       const result = await getPaginatedEmployees(
         viewMode,
         25,
         currentLastDoc,
         selectedSite !== 'ALL' ? 'currentSiteId' : undefined,
-        selectedSite !== 'ALL' ? selectedSite : undefined,
+        selectedSite !== 'ALL' ? siteIdToQuery : undefined,
         searchTerm,
         searchFieldToUse,
         hasViewScopeAll ? 'ALL' : (effectiveAllowedSiteIds || [])
@@ -514,7 +517,13 @@ const AdminMasterEmployeeListPage: React.FC<AdminMasterEmployeeListPageProps> = 
 
       const unitField = allFormFields.find(f => f && f.label && (f.label.toLowerCase().includes('unit') || f.label.toLowerCase().includes('facility')));
       const unit = unitField ? (data[unitField.id] || '').toLowerCase() : '';
-      const matchesSite = selectedSite === 'ALL' || unit === selectedSite.toLowerCase();
+      const selectedSiteObj = safeSites.find(s => s.id === selectedSite || s.name === selectedSite);
+      const matchesSite = selectedSite === 'ALL' || 
+        emp.currentSiteId === selectedSite || 
+        (selectedSiteObj && emp.currentSiteId === selectedSiteObj.id) ||
+        (selectedSiteObj && (emp.siteName || '').toLowerCase() === selectedSiteObj.name.toLowerCase()) ||
+        (selectedSiteObj && unit === selectedSiteObj.name.toLowerCase()) ||
+        unit === selectedSite.toLowerCase();
 
       // Column-level filters
       let matchesColumnFilters = true;
@@ -775,7 +784,7 @@ const AdminMasterEmployeeListPage: React.FC<AdminMasterEmployeeListPageProps> = 
               >
                 <option value="ALL">All Company Sites</option>
                 {safeSites.filter(s => s && s.status === 'Active').map(s => (
-                  <option key={s.id} value={s.name}>{s.name}</option>
+                  <option key={s.id} value={s.id}>{s.name}</option>
                 ))}
               </select>
             </div>

@@ -9,7 +9,7 @@ import Input from './common/Input';
 import { CheckCircle, XCircle, Eye, Clock, ListChecks, History, Info, Shield, Zap, Wallet, Settings, ToggleLeft, ToggleRight, Save, CalendarCheck, Plus, Trash2, RotateCcw, Loader2 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import PremiumSelect from './common/PremiumSelect';
-import { getEmployeeLookupMap, } from '../src/services/employeeService';
+import { getEmployeeLookupMap, resolveEmployeeDoc } from '../src/services/employeeService';
 import { fetchLeaveRequestsByStatus } from '../src/services/requestService';
 import { getEffectiveApprovalLevel, isRoleAssignedToSite } from '../src/utils/workflowHelper';
 import { useData } from '../src/contexts/DataContext';
@@ -39,10 +39,28 @@ const AdminLeaveManagementPage: React.FC<AdminLeaveManagementPageProps> = ({
     const { staffUsers, roles } = useData();
     const [activeTab, setActiveTab] = useState<'REQUESTS' | 'POLICY'>('REQUESTS');
     const [selectedRequest, setSelectedRequest] = useState<LeaveRequest | null>(null);
+    const [selectedEmpRecord, setSelectedEmpRecord] = useState<any>(null);
     const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
     const [adminComments, setAdminComments] = useState('');
     const [revertTargetLevel, setRevertTargetLevel] = useState(1);
     const [filterStatus, setFilterStatus] = useState<RequestStatus | 'ALL'>('ALL');
+
+    // BUG-A56-01: Fetch real employee document from master employees collection when modal opens
+    useEffect(() => {
+        if (!selectedRequest?.employeeId) {
+            setSelectedEmpRecord(null);
+            return;
+        }
+        let cancelled = false;
+        resolveEmployeeDoc(selectedRequest.employeeId)
+            .then(res => {
+                if (!cancelled && res?.data) {
+                    setSelectedEmpRecord(res.data);
+                }
+            })
+            .catch(err => console.warn("Failed to load employee doc for leave balance:", err));
+        return () => { cancelled = true; };
+    }, [selectedRequest?.employeeId]);
     const [isLookupLoading, setIsLookupLoading] = useState(false);
 
     // On-demand historical data (Approved/Rejected records loaded when tab is clicked)
@@ -93,6 +111,32 @@ const AdminLeaveManagementPage: React.FC<AdminLeaveManagementPageProps> = ({
     }, [filterStatus, allowedSiteIds]);
 
     const getEmployeeBalance = (employeeId: string, type: string) => {
+        // BUG-A56-01: Compute balance directly from master employees collection for Admins
+        if (selectedEmpRecord && (selectedEmpRecord.employeeId === employeeId || selectedEmpRecord.id === employeeId)) {
+            const empLeaves = allRequests.filter(r => (r.employeeId === employeeId || r.employeeId === selectedEmpRecord.employeeId) && r.status === 'Approved');
+            const keyMap: Record<string, string> = {
+                'Casual Leave': 'casual',
+                'Sick Leave': 'sick',
+                'Earned Leave': 'earned',
+                'Privilege Leave': 'privilege'
+            };
+            const shortKey = keyMap[type] || type.toLowerCase();
+            const configType = leavePolicy?.leaveTypes?.find(lt => lt.label === type || lt.typeId === type);
+            const defaultQuota = configType?.defaultQuota || 12;
+            const total = selectedEmpRecord.leaveBalance?.[shortKey] !== undefined ? selectedEmpRecord.leaveBalance[shortKey] : defaultQuota;
+
+            let used = 0;
+            empLeaves.filter(r => r.leaveType === type).forEach(req => {
+                const s = new Date(req.startDate);
+                const e = new Date(req.endDate);
+                const days = Math.round((e.getTime() - s.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+                used += (days > 0 ? days : 1);
+            });
+
+            if (type === LeaveType.UNPAID) return { total: '∞', used, remaining: '∞' };
+            return { total, used, remaining: Math.max(0, total - used) };
+        }
+
         const empBalance = leaveBalances.find(b => b.employeeId === employeeId);
         if (!empBalance) return { total: 0, used: 0, remaining: 0 };
         const bal = empBalance.balances[type];

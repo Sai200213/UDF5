@@ -463,29 +463,35 @@ const App: React.FC = () => {
   }, [staffUsers, sites, sendNotification]);
 
   // SMART NOTIFICATION HELPER
-  const notifyApprovers = useCallback((employeeId: string, targetRoleId: string, message: string, link?: AppView) => {
-    const employeeForm = submittedForms.find(f => f.employeeId === employeeId || f.id === employeeId);
-    if (!employeeForm || !employeeForm.data) {
-      notifyRole(targetRoleId, message, 'info', link);
-      return;
+  const notifyApprovers = useCallback((employeeId: string, targetRoleId: string, message: string, link?: AppView, directSiteId?: string) => {
+    let site = directSiteId ? sites.find(s => s.id === directSiteId || s.name === directSiteId) : undefined;
+    
+    if (!site && employeeData && (employeeData.employeeId === employeeId || employeeData.id === employeeId)) {
+      const empSite = employeeData.currentSiteId || employeeData.siteId || employeeData.unit;
+      if (empSite) site = sites.find(s => s.id === empSite || s.name === empSite);
     }
-    const sections = employeeForm.originalFormSections || [];
-    const unitField = sections
-      .flatMap(s => s.fields || [])
-      .find(f => f && f.label && (f.label.toLowerCase().includes('unit') || f.label.toLowerCase().includes('facility')));
 
-    const unitName = unitField ? String(employeeForm.data[unitField.id] || '') : '';
-    const site = sites.find(s => s.name === unitName || s.id === unitName);
+    if (!site) {
+      const employeeForm = submittedForms.find(f => f.employeeId === employeeId || f.id === employeeId);
+      if (employeeForm && employeeForm.data) {
+        const sections = employeeForm.originalFormSections || [];
+        const unitField = sections
+          .flatMap(s => s.fields || [])
+          .find(f => f && f.label && (f.label.toLowerCase().includes('unit') || f.label.toLowerCase().includes('facility')));
+        const unitName = unitField ? String(employeeForm.data[unitField.id] || '') : '';
+        site = sites.find(s => s.name === unitName || s.id === unitName);
+      }
+    }
 
     if (site && site.supervisorId) {
-      const supervisor = staffUsers.find(s => s.id === site.supervisorId);
+      const supervisor = staffUsers.find(s => s.id === site!.supervisorId);
       if (supervisor && supervisor.roleId === targetRoleId) {
         sendNotification(supervisor.id, message, 'info', link);
         return;
       }
     }
     notifyRole(targetRoleId, message, 'info', link, site?.id);
-  }, [submittedForms, sites, staffUsers, notifyRole, sendNotification]);
+  }, [submittedForms, sites, staffUsers, employeeData, notifyRole, sendNotification]);
 
   // Persistent Admin Handlers
   const handleUpdateRoles = async (newRoles: Role[] | ((prev: Role[]) => Role[])) => {

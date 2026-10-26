@@ -425,30 +425,7 @@ exports.employeeGoogleLogin = functions.https.onCall(async (request) => {
         let employeeDoc = null;
         let submissionDoc = null;
 
-        // 1. Try finding by Google UID in onboarding_submissions
-        let subSnap = await db.collection('onboarding_submissions')
-            .where('linkedUid', '==', googleUid)
-            .limit(1).get();
-        if (subSnap.empty) {
-            subSnap = await db.collection('onboarding_submissions')
-                .where('googleUid', '==', googleUid)
-                .limit(1).get();
-        }
-        if (subSnap.empty) {
-            subSnap = await db.collection('onboarding_submissions')
-                .where('uid', '==', googleUid)
-                .limit(1).get();
-        }
-        if (subSnap.empty) {
-            subSnap = await db.collection('onboarding_submissions')
-                .where('linkedGoogleEmail', '==', normalizedEmail)
-                .limit(1).get();
-        }
-        if (!subSnap.empty) {
-            submissionDoc = subSnap.docs[0];
-        }
-
-        // 2. Try finding by Google UID in employees
+        // 1. Try finding by Google UID in employees (BUG-A56-03: Active employees are primary)
         let empSnap = await db.collection('employees')
             .where('linkedUid', '==', googleUid)
             .limit(1).get();
@@ -469,6 +446,29 @@ exports.employeeGoogleLogin = functions.https.onCall(async (request) => {
         }
         if (!empSnap.empty) {
             employeeDoc = empSnap.docs[0];
+        }
+
+        // 2. Fallback: Try finding by Google UID in onboarding_submissions
+        let subSnap = await db.collection('onboarding_submissions')
+            .where('linkedUid', '==', googleUid)
+            .limit(1).get();
+        if (subSnap.empty) {
+            subSnap = await db.collection('onboarding_submissions')
+                .where('googleUid', '==', googleUid)
+                .limit(1).get();
+        }
+        if (subSnap.empty) {
+            subSnap = await db.collection('onboarding_submissions')
+                .where('uid', '==', googleUid)
+                .limit(1).get();
+        }
+        if (subSnap.empty) {
+            subSnap = await db.collection('onboarding_submissions')
+                .where('linkedGoogleEmail', '==', normalizedEmail)
+                .limit(1).get();
+        }
+        if (!subSnap.empty) {
+            submissionDoc = subSnap.docs[0];
         }
 
         // Cross-reference documents if one is missing
@@ -598,85 +598,85 @@ exports.employeeLogin = functions.https.onCall(async (request) => {
     let matchedData = null;
     let matchedCollection = null;
 
-    // 1. Check onboarding_submissions (self-onboarded approved users)
-    const subSnap = await db.collection('onboarding_submissions')
+    // 1. Check employees collection (BUG-A56-03: Active Master Employee Directory is primary)
+    const empSnap = await db.collection('employees')
         .where('employeeId', '==', employeeId)
-        .where('status', '==', 'Approved')
         .limit(1)
         .get();
 
-    if (!subSnap.empty) {
-        const sub = subSnap.docs[0];
-        const subData = sub.data();
+    if (!empSnap.empty) {
+        const emp = empSnap.docs[0];
+        const empData = emp.data();
         let isMatch = false;
 
-        if (subData.passwordHash) {
-            isMatch = await verifyPassword(password, subData.passwordHash);
-        } else if (subData.mockPassword) {
-            isMatch = subData.mockPassword === password;
+        if (empData.passwordHash) {
+            isMatch = await verifyPassword(password, empData.passwordHash);
+        } else if (empData.mockPassword) {
+            isMatch = empData.mockPassword === password;
         }
 
         if (isMatch) {
-            // SECURITY: Verify the employee is active, not disabled, not relieved, not terminated, and not blocked
-            let isInactive = subData.isActive === false || subData.isDisabled === true || subData.isRelieved === true || subData.isBlocked === true || subData.status === 'relieved' || subData.status === 'terminated' || subData.status === 'rejected' || !!subData.deletedAt;
-            if (!isInactive) {
-                // Cross-check employees collection by portalId (sub.id) or employeeId
-                let empCheck = await db.collection('employees').doc(sub.id).get();
-                if (!empCheck.exists) {
-                    const empSnapCheck = await db.collection('employees').where('employeeId', '==', employeeId).limit(1).get();
-                    if (!empSnapCheck.empty) empCheck = empSnapCheck.docs[0];
-                }
-                if (empCheck.exists) {
-                    const checkData = empCheck.data();
-                    if (checkData.isActive === false || checkData.isDisabled === true || checkData.isRelieved === true || checkData.isBlocked === true || checkData.status === 'relieved' || checkData.status === 'terminated' || !!checkData.deletedAt) {
-                        isInactive = true;
-                    }
-                }
-            }
-
-            if (isInactive) {
+            if (empData.isActive === false || empData.isDisabled === true || empData.isRelieved === true || empData.isBlocked === true || empData.status === 'relieved' || empData.status === 'terminated' || !!empData.deletedAt) {
                 console.warn(`[LOGIN] Blocked login for disabled/inactive/relieved employee ${employeeId}`);
                 throw new functions.https.HttpsError('permission-denied', 'This account is disabled or inactive. Disabled employees cannot log in.');
             }
-
-            matchedDoc = sub;
-            matchedData = subData;
-            matchedCollection = 'onboarding_submissions';
-            console.log(`[LOGIN] Match found in onboarding_submissions for ${employeeId}`);
+            matchedDoc = emp;
+            matchedData = empData;
+            matchedCollection = 'employees';
+            console.log(`[LOGIN] Match found in employees collection for ${employeeId}`);
         } else {
-            console.log(`[LOGIN] User found in onboarding_submissions for ${employeeId} but password mismatch`);
+            console.log(`[LOGIN] User found in employees collection for ${employeeId} but password mismatch`);
         }
     }
 
-    // 2. Check employees collection (bulk-imported users)
+    // 2. Fallback: Check onboarding_submissions (self-onboarded joiners pending sync)
     if (!matchedDoc) {
-        const empSnap = await db.collection('employees')
+        const subSnap = await db.collection('onboarding_submissions')
             .where('employeeId', '==', employeeId)
+            .where('status', '==', 'Approved')
             .limit(1)
             .get();
 
-        if (!empSnap.empty) {
-            const emp = empSnap.docs[0];
-            const empData = emp.data();
+        if (!subSnap.empty) {
+            const sub = subSnap.docs[0];
+            const subData = sub.data();
             let isMatch = false;
 
-            if (empData.passwordHash) {
-                isMatch = await verifyPassword(password, empData.passwordHash);
-            } else if (empData.mockPassword) {
-                isMatch = empData.mockPassword === password;
+            if (subData.passwordHash) {
+                isMatch = await verifyPassword(password, subData.passwordHash);
+            } else if (subData.mockPassword) {
+                isMatch = subData.mockPassword === password;
             }
 
             if (isMatch) {
-                if (empData.isActive === false || empData.isDisabled === true || empData.isRelieved === true || empData.isBlocked === true || empData.status === 'relieved' || empData.status === 'terminated' || !!empData.deletedAt) {
+                // SECURITY: Verify the employee is active, not disabled, not relieved, not terminated, and not blocked
+                let isInactive = subData.isActive === false || subData.isDisabled === true || subData.isRelieved === true || subData.isBlocked === true || subData.status === 'relieved' || subData.status === 'terminated' || subData.status === 'rejected' || !!subData.deletedAt;
+                if (!isInactive) {
+                    // Cross-check employees collection by portalId (sub.id) or employeeId
+                    let empCheck = await db.collection('employees').doc(sub.id).get();
+                    if (!empCheck.exists) {
+                        const empSnapCheck = await db.collection('employees').where('employeeId', '==', employeeId).limit(1).get();
+                        if (!empSnapCheck.empty) empCheck = empSnapCheck.docs[0];
+                    }
+                    if (empCheck.exists) {
+                        const checkData = empCheck.data();
+                        if (checkData.isActive === false || checkData.isDisabled === true || checkData.isRelieved === true || checkData.isBlocked === true || checkData.status === 'relieved' || checkData.status === 'terminated' || !!checkData.deletedAt) {
+                            isInactive = true;
+                        }
+                    }
+                }
+
+                if (isInactive) {
                     console.warn(`[LOGIN] Blocked login for disabled/inactive/relieved employee ${employeeId}`);
                     throw new functions.https.HttpsError('permission-denied', 'This account is disabled or inactive. Disabled employees cannot log in.');
                 }
-                matchedDoc = emp;
-                matchedData = empData;
-                matchedCollection = 'employees';
-                console.log(`[LOGIN] Match found in employees collection for ${employeeId}`);
+
+                matchedDoc = sub;
+                matchedData = subData;
+                matchedCollection = 'onboarding_submissions';
+                console.log(`[LOGIN] Match found in onboarding_submissions for ${employeeId}`);
             } else {
-                console.log(`[LOGIN] User found in employees collection for ${employeeId} but password mismatch`);
+                console.log(`[LOGIN] User found in onboarding_submissions for ${employeeId} but password mismatch`);
             }
         }
     }
@@ -933,17 +933,18 @@ exports.changeEmployeePassword = functions.https.onCall(async (request) => {
         let docRef = null;
         let empData = null;
 
-        const subSnap = await db.collection('onboarding_submissions')
+        // BUG-A56-03: Check master employees collection first
+        const empSnap = await db.collection('employees')
             .where('employeeId', '==', employeeId).limit(1).get();
-        if (!subSnap.empty) {
-            docRef = subSnap.docs[0].ref;
-            empData = subSnap.docs[0].data();
+        if (!empSnap.empty) {
+            docRef = empSnap.docs[0].ref;
+            empData = empSnap.docs[0].data();
         } else {
-            const empSnap = await db.collection('employees')
+            const subSnap = await db.collection('onboarding_submissions')
                 .where('employeeId', '==', employeeId).limit(1).get();
-            if (!empSnap.empty) {
-                docRef = empSnap.docs[0].ref;
-                empData = empSnap.docs[0].data();
+            if (!subSnap.empty) {
+                docRef = subSnap.docs[0].ref;
+                empData = subSnap.docs[0].data();
             }
         }
 
@@ -1076,31 +1077,31 @@ exports.linkEmployeeGoogleAccount = functions.https.onCall(async (request) => {
         let collectionName = null;
         let docId = null;
 
-        // Check onboarding_submissions first (self-onboarded employees)
-        const subSnap = await db.collection('onboarding_submissions')
-            .where('employeeId', '==', employeeId)
-            .limit(1)
-            .get();
-
-        if (!subSnap.empty) {
-            const subData = subSnap.docs[0].data();
-            collectionName = 'onboarding_submissions';
-            docId = subSnap.docs[0].id;
-            if (subData.passwordHash) {
-                isVerified = await verifyPassword(currentPassword, subData.passwordHash);
+        // BUG-A56-03: Check master employees collection first
+        const empSnap = await db.collection('employees')
+            .where('employeeId', '==', employeeId).limit(1).get();
+        if (!empSnap.empty) {
+            const empData = empSnap.docs[0].data();
+            collectionName = 'employees';
+            docId = empSnap.docs[0].id;
+            if (empData.passwordHash) {
+                isVerified = await verifyPassword(currentPassword, empData.passwordHash);
             }
         }
 
-        // Fallback: check employees collection (bulk-imported)
+        // Fallback: check onboarding_submissions
         if (!isVerified) {
-            const empSnap = await db.collection('employees')
-                .where('employeeId', '==', employeeId).limit(1).get();
-            if (!empSnap.empty) {
-                const empData = empSnap.docs[0].data();
-                collectionName = 'employees';
-                docId = empSnap.docs[0].id;
-                if (empData.passwordHash) {
-                    isVerified = await verifyPassword(currentPassword, empData.passwordHash);
+            const subSnap = await db.collection('onboarding_submissions')
+                .where('employeeId', '==', employeeId)
+                .limit(1)
+                .get();
+
+            if (!subSnap.empty) {
+                const subData = subSnap.docs[0].data();
+                collectionName = 'onboarding_submissions';
+                docId = subSnap.docs[0].id;
+                if (subData.passwordHash) {
+                    isVerified = await verifyPassword(currentPassword, subData.passwordHash);
                 }
             }
         }
@@ -1167,15 +1168,16 @@ exports.verifyEmployeePassword = functions.https.onCall(async (request) => {
         // Check both collections
         let empData = null;
 
-        const subSnap = await db.collection('onboarding_submissions')
+        // BUG-A56-03: Check master employees collection first
+        const empSnap = await db.collection('employees')
             .where('employeeId', '==', employeeId).limit(1).get();
-        if (!subSnap.empty) {
-            empData = subSnap.docs[0].data();
+        if (!empSnap.empty) {
+            empData = empSnap.docs[0].data();
         } else {
-            const empSnap = await db.collection('employees')
+            const subSnap = await db.collection('onboarding_submissions')
                 .where('employeeId', '==', employeeId).limit(1).get();
-            if (!empSnap.empty) {
-                empData = empSnap.docs[0].data();
+            if (!subSnap.empty) {
+                empData = subSnap.docs[0].data();
             }
         }
 
@@ -1230,25 +1232,25 @@ exports.unlinkEmployeeGoogleAccount = functions.https.onCall(async (request) => 
         let isVerified = false;
         let docRefs = [];
 
-        const subSnap = await db.collection('onboarding_submissions')
-            .where('employeeId', '==', employeeId).limit(1).get();
-
-        if (!subSnap.empty) {
-            docRefs.push(subSnap.docs[0].ref);
-            const subData = subSnap.docs[0].data();
-            if (subData.passwordHash) {
-                isVerified = await verifyPassword(currentPassword, subData.passwordHash);
-            }
-        }
-
+        // BUG-A56-03: Check master employees collection first
         const empSnap = await db.collection('employees')
             .where('employeeId', '==', employeeId).limit(1).get();
         if (!empSnap.empty) {
             docRefs.push(empSnap.docs[0].ref);
+            const empData = empSnap.docs[0].data();
+            if (empData.passwordHash) {
+                isVerified = await verifyPassword(currentPassword, empData.passwordHash);
+            }
+        }
+
+        const subSnap = await db.collection('onboarding_submissions')
+            .where('employeeId', '==', employeeId).limit(1).get();
+        if (!subSnap.empty) {
+            docRefs.push(subSnap.docs[0].ref);
             if (!isVerified) {
-                const empData = empSnap.docs[0].data();
-                if (empData.passwordHash) {
-                    isVerified = await verifyPassword(currentPassword, empData.passwordHash);
+                const subData = subSnap.docs[0].data();
+                if (subData.passwordHash) {
+                    isVerified = await verifyPassword(currentPassword, subData.passwordHash);
                 }
             }
         }

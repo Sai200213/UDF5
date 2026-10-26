@@ -492,7 +492,7 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
         if (!hasPermission(Permission.VIEW_AUDIT_LOGS)) return accessDenied;
         return <AdminAuditLogPage userRole={userRole} isSuperAdmin={isSuperAdmin} />;
       case AppView.ADMIN_PORTAL_PROFILE:
-        return <AdminStaffProfilePage authUser={authUser} sites={sites} submittedForms={submittedForms} roles={roles} staffUsers={staffUsers} />;
+        return <AdminStaffProfilePage authUser={authUser} sites={sites} roles={roles} staffUsers={staffUsers} />;
       case AppView.ADMIN_PORTAL_MASTER_EMPLOYEE_LIST:
         if (!hasPermission(Permission.EMPLOYEES_VIEW)) return accessDenied;
         return <AdminMasterEmployeeListPage

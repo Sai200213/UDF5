@@ -1,13 +1,15 @@
 
-import React, { useMemo } from 'react';
-import { User, Site, SubmittedFormData, SubmissionStatus, Role, StaffUser, Permission } from '../types';
+import React, { useMemo, useState, useEffect } from 'react';
+import { User, Site, SubmittedFormData, Role, StaffUser, Permission } from '../types';
 import { Shield, MapPin, Users, Building, Info, Star, GitBranch, ChevronRight } from 'lucide-react';
 import ProfileAvatar from './ProfileAvatar';
+import { getSiteHeadcounts } from '../src/services/employeeService';
+import { defaultFormSections } from '../src/constants/defaults';
 
 interface AdminStaffProfilePageProps {
   authUser: User | null;
   sites: Site[];
-  submittedForms: SubmittedFormData[];
+  submittedForms?: SubmittedFormData[];
   roles: Role[];
   staffUsers: StaffUser[];
 }
@@ -37,20 +39,19 @@ const AdminStaffProfilePage: React.FC<AdminStaffProfilePageProps> = ({
     return userRole?.permissions.includes(p) || false;
   };
 
-  const approvedEmployees = useMemo(() => {
-    return submittedForms.filter(f => f.status === SubmissionStatus.APPROVED);
-  }, [submittedForms]);
+  // BUG-A56-02: Read real-time site headcounts from master employees collection
+  const [siteHeadcounts, setSiteHeadcounts] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    getSiteHeadcounts(sites, defaultFormSections).then(counts => {
+      if (!cancelled) setSiteHeadcounts(counts);
+    }).catch(err => console.warn("Failed to load site headcounts from employees:", err));
+    return () => { cancelled = true; };
+  }, [sites]);
 
   const getSiteHeadcount = (siteName: string) => {
-    return approvedEmployees.filter(emp => {
-      if (!emp || !emp.data) return false;
-      const sections = emp.originalFormSections || [];
-      const unitField = sections
-        .flatMap(s => s.fields || [])
-        .find(f => f && f.label && (f.label.toLowerCase().includes('unit') || f.label.toLowerCase().includes('facility')));
-
-      return unitField && String(emp.data[unitField.id] || '').toLowerCase().trim() === siteName.toLowerCase().trim();
-    }).length;
+    return siteHeadcounts[siteName] || 0;
   };
 
   const assignedSites = useMemo(() => {
@@ -59,7 +60,7 @@ const AdminStaffProfilePage: React.FC<AdminStaffProfilePageProps> = ({
 
   const totalPersonnelManagedDirectly = useMemo(() => {
     return assignedSites.reduce((acc, site) => acc + getSiteHeadcount(site.name), 0);
-  }, [assignedSites, approvedEmployees]);
+  }, [assignedSites, siteHeadcounts]);
 
   // Hierarchy Logic
   const reportingHierarchy = useMemo(() => {

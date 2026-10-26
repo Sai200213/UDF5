@@ -1,10 +1,12 @@
 
-import React, { useCallback, useMemo } from 'react';
-import { SubmittedFormData, FormSection, SubmissionStatus } from '../types';
-import { Users, BarChart3 } from 'lucide-react';
+import React, { useCallback, useMemo, useState, useEffect } from 'react';
+import { SubmittedFormData, FormSection } from '../types';
+import { Users, BarChart3, Loader2 } from 'lucide-react';
+import { collection, query, where, getDocs, limit } from 'firebase/firestore';
+import { db } from '../src/lib/firebase';
 
 interface AdminTeamOverviewPageProps {
-  submittedForms: SubmittedFormData[];
+  submittedForms?: SubmittedFormData[];
   formSections: FormSection[];
 }
 
@@ -22,11 +24,34 @@ const findFieldIdByLabel = (labelToFind: string, formSections: FormSection[]): s
 };
 
 const AdminTeamOverviewPage: React.FC<AdminTeamOverviewPageProps> = ({ submittedForms, formSections }) => {
-  const approvedEmployees = useMemo(() => {
-    return submittedForms.filter(form => form.status === SubmissionStatus.APPROVED);
-  }, [submittedForms]);
+  // BUG-A56-02: Read active employee headcount directly from master employees collection
+  const [activeEmployees, setActiveEmployees] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const totalApprovedEmployees = approvedEmployees.length;
+  useEffect(() => {
+    let cancelled = false;
+    const fetchActive = async () => {
+      try {
+        const q = query(
+          collection(db, 'employees'),
+          where('isActive', '==', true),
+          limit(1000)
+        );
+        const snap = await getDocs(q);
+        if (!cancelled) {
+          setActiveEmployees(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        }
+      } catch (err) {
+        console.warn("Failed to load active employees for team overview:", err);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    fetchActive();
+    return () => { cancelled = true; };
+  }, []);
+
+  const totalApprovedEmployees = activeEmployees.length;
 
   const postFieldId = useMemo(() => findFieldIdByLabel("Post of Apply", formSections), [formSections]);
   const unitFieldId = useMemo(() => findFieldIdByLabel("Unit or Facility", formSections), [formSections]);
@@ -39,22 +64,23 @@ const AdminTeamOverviewPage: React.FC<AdminTeamOverviewPageProps> = ({ submitted
       byEmploymentHistory: {} as Record<string, number>,
     };
 
-    approvedEmployees.forEach(emp => {
-      if (postFieldId && emp.data[postFieldId]) {
-        const post = String(emp.data[postFieldId]);
+    activeEmployees.forEach(emp => {
+      const data = emp.data || emp.formData || emp;
+      if (postFieldId && data[postFieldId]) {
+        const post = String(data[postFieldId]);
         stats.byPost[post] = (stats.byPost[post] || 0) + 1;
       }
-      if (unitFieldId && emp.data[unitFieldId]) {
-        const unit = String(emp.data[unitFieldId]);
+      if (unitFieldId && data[unitFieldId]) {
+        const unit = String(data[unitFieldId]);
         stats.byUnit[unit] = (stats.byUnit[unit] || 0) + 1;
       }
-      if (employmentHistoryFieldId && emp.data[employmentHistoryFieldId]) {
-        const history = String(emp.data[employmentHistoryFieldId]);
+      if (employmentHistoryFieldId && data[employmentHistoryFieldId]) {
+        const history = String(data[employmentHistoryFieldId]);
         stats.byEmploymentHistory[history] = (stats.byEmploymentHistory[history] || 0) + 1;
       }
     });
     return stats;
-  }, [approvedEmployees, postFieldId, unitFieldId, employmentHistoryFieldId]);
+  }, [activeEmployees, postFieldId, unitFieldId, employmentHistoryFieldId]);
 
   const teamStats = useMemo(() => aggregateData(), [aggregateData]);
 
