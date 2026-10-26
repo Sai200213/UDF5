@@ -1041,11 +1041,12 @@ const App: React.FC = () => {
     setLeaveBalances(balances);
   }, [employees, leavePolicy]);
 
-  // Submissions subscription - ADMINS get all (client-side guards in AdminReviewSubmissionsPage handle role-based filtering)
+  // Submissions subscription - On-demand for ADMINS (loads when tab opens, then cached for session)
   // EMPLOYEES get only their own submissions
-  // DO NOT add allowedSiteIds or roles to deps — causes infinite re-render loop (new array ref on every Firestore snapshot)
+  const hasSubmissionsSubscribedRef = useRef(false);
   useEffect(() => {
     if (!authUser) {
+      hasSubmissionsSubscribedRef.current = false;
       setSubmittedForms([]);
       return;
     }
@@ -1053,17 +1054,23 @@ const App: React.FC = () => {
     let unsubSubmissions = () => { };
 
     if (authUser.type === UserType.ADMIN) {
-      // Always fetch all submissions for admin users.
-      // Role-based visibility (field officer site restriction, manager/HR scope-all) is
-      // enforced client-side in AdminReviewSubmissionsPage via hasViewScopeAll + allowedSiteIds.
-      unsubSubmissions = subscribeToSubmissions((data) => {
-        const mapped = data.map(d => ({
-          ...d,
-          data: d.formData,
-          submissionDate: typeof d.timestamp === 'object' ? new Date().toISOString() : d.timestamp,
-        } as unknown as SubmittedFormData));
-        setSubmittedForms(mapped);
-      });
+      // On-demand: Only subscribe when admin visits submission review or site management, then keep cached for the session
+      const shouldSubscribe = 
+        currentView === AppView.ADMIN_PORTAL_SUBMISSION_REVIEW || 
+        currentView === AppView.ADMIN_PORTAL_SITE_MANAGEMENT || 
+        hasSubmissionsSubscribedRef.current;
+
+      if (shouldSubscribe) {
+        hasSubmissionsSubscribedRef.current = true;
+        unsubSubmissions = subscribeToSubmissions((data) => {
+          const mapped = data.map(d => ({
+            ...d,
+            data: d.formData,
+            submissionDate: typeof d.timestamp === 'object' ? new Date().toISOString() : d.timestamp,
+          } as unknown as SubmittedFormData));
+          setSubmittedForms(mapped);
+        });
+      }
     } else if (authUser.type === UserType.EMPLOYEE) {
       log.log(`Setting up personal submission subscription for Employee: ${authUser.id}`);
       unsubSubmissions = subscribeToSubmissionsByUid(authUser.id, (data) => {
@@ -1081,7 +1088,7 @@ const App: React.FC = () => {
     return () => {
       unsubSubmissions();
     };
-  }, [authUser, setSubmittedForms]); // ONLY authUser — stable deps, no re-render loop
+  }, [authUser, setSubmittedForms, currentView]);
 
 
 

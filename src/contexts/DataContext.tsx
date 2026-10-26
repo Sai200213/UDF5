@@ -1,7 +1,7 @@
 import log from "@/src/utils/logger";
 import { db, auth } from '../firebase/config';
 import { doc, onSnapshot, query, collection, where } from 'firebase/firestore';
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, ReactNode } from 'react';
 import {
     SubmittedFormData,
     LeaveRequest,
@@ -123,6 +123,7 @@ interface DataContextType {
     };
     dashboardAnalytics: DashboardAnalytics | null;
     refreshGlobalStats: () => Promise<void>;
+    ensureModuleSubscribed: (module: 'LEAVES' | 'ACCOUNT_UPDATES' | 'DISCIPLINE' | 'RESIGNATIONS' | 'DRAFTS') => void;
 }
 
 const DataContext = createContext<DataContextType | undefined>(undefined);
@@ -161,6 +162,58 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         pendingProfiles: 0,
         pendingResignations: 0
     });
+
+    // Session Caching & On-Demand Subscription Manager (Phase 2 & 3)
+    const subscribedModulesRef = useRef<Set<string>>(new Set());
+    const dynamicUnsubsRef = useRef<(() => void)[]>([]);
+
+    const ensureModuleSubscribed = useCallback((moduleId: 'LEAVES' | 'ACCOUNT_UPDATES' | 'DISCIPLINE' | 'RESIGNATIONS' | 'DRAFTS') => {
+        if (!user || (user as any).type !== 'Admin') return;
+        if (subscribedModulesRef.current.has(moduleId)) return;
+        subscribedModulesRef.current.add(moduleId);
+
+        log.log(`[DataContext] On-demand subscribing to module: ${moduleId}`);
+
+        if (moduleId === 'LEAVES') {
+            const unsub = subscribeToLeaveRequests((reqs) => {
+                log.log(`[DataContext] Received ${reqs.length} leave requests (on-demand)`);
+                setLeaveRequests(reqs);
+            });
+            dynamicUnsubsRef.current.push(unsub);
+        } else if (moduleId === 'ACCOUNT_UPDATES') {
+            const unsub = subscribeToAccountUpdates((reqs) => {
+                log.log(`[DataContext] Received ${reqs.length} account updates (on-demand)`);
+                setAccountUpdateRequests(reqs);
+            });
+            dynamicUnsubsRef.current.push(unsub);
+        } else if (moduleId === 'DISCIPLINE') {
+            const unsub = subscribeToDisciplinaryActions((actions) => {
+                log.log(`[DataContext] Received ${actions.length} disciplinary actions (on-demand)`);
+                setDisciplinaryActions(actions);
+            });
+            dynamicUnsubsRef.current.push(unsub);
+        } else if (moduleId === 'RESIGNATIONS') {
+            const unsub = subscribeToResignationRequests((reqs) => {
+                log.log(`[DataContext] Received ${reqs.length} resignations (on-demand)`);
+                setResignationRequests(reqs);
+            });
+            dynamicUnsubsRef.current.push(unsub);
+        } else if (moduleId === 'DRAFTS') {
+            const unsub = subscribeToDrafts((drafts) => {
+                log.log(`[DataContext] Received ${drafts.length} drafts (on-demand)`);
+                setDrafts(drafts);
+            });
+            dynamicUnsubsRef.current.push(unsub);
+        }
+    }, [user]);
+
+    useEffect(() => {
+        return () => {
+            subscribedModulesRef.current.clear();
+            dynamicUnsubsRef.current.forEach(u => u());
+            dynamicUnsubsRef.current = [];
+        };
+    }, [user?.id]);
 
     const [dashboardAnalytics, setDashboardAnalytics] = useState<DashboardAnalytics | null>(null);
 
@@ -441,18 +494,7 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         let unsubDisciplinary = () => { };
 
         if ((user as any).type === 'Admin') {
-            log.log('[DataContext] User is Admin, subscribing to general operational data...');
-            // Drafts (All Admins allowed)
-            unsubDrafts = subscribeToDrafts((data) => {
-                log.log(`[DataContext] Received ${data.length} drafts`);
-                setDrafts(data);
-            });
-
-            // Resignations (All Admins allowed)
-            unsubResignations = subscribeToResignationRequests((reqs) => {
-                log.log(`[DataContext] Received ${reqs.length} resignations`);
-                setResignationRequests(reqs);
-            });
+            log.log('[DataContext] User is Admin (drafts & resignations loaded on-demand via ensureModuleSubscribed)');
         } else if ((user as any).type === 'Employee') {
             log.log('[DataContext] User is Employee, subscribing to personal data...');
             const employeeId = (user as any).employeeId;
@@ -620,33 +662,7 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
                 return Boolean(userRoleObj?.permissions?.includes(p));
             };
 
-            // Leave Requests
-            const hasLeavesPerm = hasPermission(Permission.VIEW_LEAVES) || hasPermission(Permission.MANAGE_LEAVES);
-            if (hasLeavesPerm) {
-                unsubLeaves = subscribeToLeaveRequests((reqs) => {
-                    log.log(`[DataContext] Received ${reqs.length} leave requests`);
-                    setLeaveRequests(reqs);
-                });
-            }
-
-            // Account Updates
-            const hasUpdatesPerm = hasPermission(Permission.VIEW_ACCOUNT_UPDATES) || hasPermission(Permission.MANAGE_ACCOUNT_UPDATES);
-            if (hasUpdatesPerm) {
-                unsubAccountUpdates = subscribeToAccountUpdates((reqs) => {
-                    log.log(`[DataContext] Received ${reqs.length} account updates`);
-                    setAccountUpdateRequests(reqs);
-                });
-            }
-
-            // Disciplinary Actions
-            const hasDisciplinePerm = hasPermission(Permission.VIEW_DISCIPLINE) || hasPermission(Permission.MANAGE_DISCIPLINE);
-            if (hasDisciplinePerm) {
-                unsubDisciplinary = subscribeToDisciplinaryActions((actions) => {
-                    log.log(`[DataContext] Received ${actions.length} disciplinary actions`);
-                    setDisciplinaryActions(actions);
-                });
-            }
-
+            // Leaves, Account Updates, & Disciplinary are loaded on-demand via ensureModuleSubscribed when tab activates
             // Staff Users - always subscribe for admins so that site supervisors and workflow progression can resolve skips correctly
             unsubStaff = subscribeToStaffUsers((users) => {
                 log.log(`[DataContext] Received ${users.length} staff users`);
@@ -711,7 +727,8 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         setPortalConfig,
         stats,
         dashboardAnalytics,
-        refreshGlobalStats
+        refreshGlobalStats,
+        ensureModuleSubscribed
     };
 
     return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

@@ -4240,19 +4240,25 @@ export const getEmployeeLookupMap = async (formSections: FormSection[], allowedS
     // Fallback lookup if unitField is missing
     const unitFieldId = unitField?.id;
 
-    const snapshot = await getDocs(collection(db, EMPLOYEES_COLLECTION));
+    // Query only active employees bounded by limit to prevent 1,000+ unbounded document scans (Phase 4)
+    let q = query(
+        collection(db, EMPLOYEES_COLLECTION),
+        where("isActive", "==", true),
+        limit(150)
+    );
+    if (allowedSiteIds && allowedSiteIds.length > 0) {
+        q = query(
+            collection(db, EMPLOYEES_COLLECTION),
+            where("isActive", "==", true),
+            where("currentSiteId", "in", allowedSiteIds.slice(0, 10)),
+            limit(150)
+        );
+    }
+    const snapshot = await getDocs(q);
     const lookup: Record<string, { name: string, siteName: string, id: string, siteId?: string }> = {};
 
     snapshot.docs.forEach(doc => {
         const data = doc.data() as any;
-        
-        // Scope filter
-        if (allowedSiteIds && allowedSiteIds.length > 0) {
-            const currentSiteId = data.currentSiteId || '';
-            const assignedSiteIds = data.assignedSiteIds || [];
-            const hasMatch = allowedSiteIds.includes(currentSiteId) || assignedSiteIds.some((id: string) => allowedSiteIds.includes(id));
-            if (!hasMatch) return;
-        }
 
         const empId = data.employeeId || doc.id;
         lookup[empId] = {

@@ -325,14 +325,14 @@ export const AdminInvitesPage: React.FC<AdminInvitesPageProps> = ({
     let qSub;
     if (isSuperAdmin || hasPermission(Permission.INVITES_VIEW_ALL) || hasPermission(Permission.INVITES_MANAGE)) {
       // Avoid compound inequality query crashes; query directly and filter in memory
-      qEmp = query(collection(db, 'employees'), limit(500));
-      qSub = query(collection(db, 'onboarding_submissions'), limit(500));
+      qEmp = query(collection(db, 'employees'), limit(50));
+      qSub = query(collection(db, 'onboarding_submissions'), limit(50));
     } else {
       const creatorId = auth.currentUser?.uid || authUser.id;
       const targetRecruiterIds = Array.from(new Set([authUser.id, creatorId, (authUser as any)?.username])).filter(Boolean);
       // Clean equality-only query requiring no composite index
-      qEmp = query(collection(db, 'employees'), where('recruitedBy', 'in', targetRecruiterIds.slice(0, 10)), limit(500));
-      qSub = query(collection(db, 'onboarding_submissions'), where('recruitedBy', 'in', targetRecruiterIds.slice(0, 10)), limit(500));
+      qEmp = query(collection(db, 'employees'), where('recruitedBy', 'in', targetRecruiterIds.slice(0, 10)), limit(50));
+      qSub = query(collection(db, 'onboarding_submissions'), where('recruitedBy', 'in', targetRecruiterIds.slice(0, 10)), limit(50));
     }
 
     let latestEmployees: any[] = [];

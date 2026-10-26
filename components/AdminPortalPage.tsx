@@ -1,38 +1,52 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, Suspense, lazy } from 'react';
 import { updatePublicStats } from '../src/services/statsService';
 import SectionItem from './SectionItem';
 import Button from './common/Button';
 import Input from './common/Input';
 import { FormSection, FormField, SubmittedFormData, LeaveRequest, AccountUpdateRequest, ResignationRequest, RequestStatus, Role, StaffUser, Permission, User, WorkflowConfig, Site, LeaveBalance, DisciplinaryAction, LeavePolicy, PortalConfig, AuditLogEntry, Notification, DraftSubmission } from '../types';
-import { PlusCircle, LogOut, Settings, Users, CalendarCheck, UserCheck, Home, ShieldHalf, UserPlus, Crown, GitBranch, CheckCircle, AlertCircle, X, MapPin, UserCircle, List, UserCog, FormInput, UserMinus, Gavel, ClipboardList, ChevronDown, ChevronRight, Building, Menu, ChevronLeft, Layout, Bell, FileClock, LayoutDashboard, Search, Briefcase, Archive, Link2, Globe, ShieldCheck, MessageSquare, Trash2 } from 'lucide-react';
+import { PlusCircle, LogOut, Settings, Users, CalendarCheck, UserCheck, Home, ShieldHalf, UserPlus, Crown, GitBranch, CheckCircle, AlertCircle, X, MapPin, UserCircle, List, UserCog, FormInput, UserMinus, Gavel, ClipboardList, ChevronDown, ChevronRight, Building, Menu, ChevronLeft, Layout, Bell, FileClock, LayoutDashboard, Search, Briefcase, Archive, Link2, Globe, ShieldCheck, MessageSquare, Trash2, Loader2 } from 'lucide-react';
 import { AppView } from '../App';
-import AdminReviewSubmissionsPage from './AdminReviewSubmissionsPage';
-import AdminLeaveManagementPage from './AdminLeaveManagementPage';
-import AdminAccountUpdateManagementPage from './AdminAccountUpdateManagementPage';
-import AdminStaffManagementPage from './AdminStaffManagementPage';
-import AdminRoleManagementPage from './AdminRoleManagementPage';
-import AdminWorkflowConfigPage from './AdminWorkflowConfigPage';
-import AdminSiteManagementPage from './AdminSiteManagementPage';
-import AdminVacancyManager from './AdminVacancyManager';
-import AdminStaffProfilePage from './AdminStaffProfilePage';
-import AdminMasterEmployeeListPage from './AdminMasterEmployeeListPage';
-import AdminResignationManagementPage from './AdminResignationManagementPage';
-import AdminDisciplinaryPage from './AdminDisciplinaryPage';
+import { useData } from '../src/contexts/DataContext';
+
+// Keep AdminDashboardPage static for 0ms instant dashboard opening
 import AdminDashboardPage from './AdminDashboardPage';
-import AdminWebsiteManager from './AdminWebsiteManager';
-import AdminAuditLogPage from './AdminAuditLogPage';
-import AdminDraftsManagementPage from './AdminDraftsManagementPage';
-import EmployeeTimelinePage from './events/EmployeeTimelinePage';
-import AdminLegacySystemsPage from './AdminLegacySystemsPage';
-import AdminTimelineSearchPage from './AdminTimelineSearchPage';
-import AdminCorrectionRequestsPage from './AdminCorrectionRequestsPage';
-import AdminInvitesPage from './AdminInvitesPage';
-import AdminBgvManagementPage from './AdminBgvManagementPage';
-import AdminGrievancesPage from './AdminGrievancesPage';
-import AdminRecycleBinPage from './AdminRecycleBinPage';
+
+// Lazy-load secondary admin pages on-demand (IMP-6)
+const AdminReviewSubmissionsPage = lazy(() => import('./AdminReviewSubmissionsPage'));
+const AdminLeaveManagementPage = lazy(() => import('./AdminLeaveManagementPage'));
+const AdminAccountUpdateManagementPage = lazy(() => import('./AdminAccountUpdateManagementPage'));
+const AdminStaffManagementPage = lazy(() => import('./AdminStaffManagementPage'));
+const AdminRoleManagementPage = lazy(() => import('./AdminRoleManagementPage'));
+const AdminWorkflowConfigPage = lazy(() => import('./AdminWorkflowConfigPage'));
+const AdminSiteManagementPage = lazy(() => import('./AdminSiteManagementPage'));
+const AdminVacancyManager = lazy(() => import('./AdminVacancyManager'));
+const AdminStaffProfilePage = lazy(() => import('./AdminStaffProfilePage'));
+const AdminMasterEmployeeListPage = lazy(() => import('./AdminMasterEmployeeListPage'));
+const AdminResignationManagementPage = lazy(() => import('./AdminResignationManagementPage'));
+const AdminDisciplinaryPage = lazy(() => import('./AdminDisciplinaryPage'));
+const AdminWebsiteManager = lazy(() => import('./AdminWebsiteManager'));
+const AdminAuditLogPage = lazy(() => import('./AdminAuditLogPage'));
+const AdminDraftsManagementPage = lazy(() => import('./AdminDraftsManagementPage'));
+const EmployeeTimelinePage = lazy(() => import('./events/EmployeeTimelinePage'));
+const AdminLegacySystemsPage = lazy(() => import('./AdminLegacySystemsPage'));
+const AdminTimelineSearchPage = lazy(() => import('./AdminTimelineSearchPage'));
+const AdminCorrectionRequestsPage = lazy(() => import('./AdminCorrectionRequestsPage'));
+const AdminInvitesPage = lazy(() => import('./AdminInvitesPage'));
+const AdminBgvManagementPage = lazy(() => import('./AdminBgvManagementPage'));
+const AdminGrievancesPage = lazy(() => import('./AdminGrievancesPage'));
+const AdminRecycleBinPage = lazy(() => import('./AdminRecycleBinPage'));
 import Breadcrumb from './common/Breadcrumb';
 import { isNativeApp } from '../src/utils/capacitor-utils';
+
+const PageLoadingFallback = () => (
+  <div className="flex items-center justify-center p-12 min-h-[400px]">
+    <div className="flex flex-col items-center space-y-3">
+      <Loader2 className="animate-spin text-blue-600" size={32} />
+      <span className="text-sm font-medium text-slate-500">Loading module...</span>
+    </div>
+  </div>
+);
 
 
 interface AdminPortalPageProps {
@@ -202,6 +216,30 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
       updatePublicStats().catch(err => console.error("Failed to sync public stats:", err));
     }
   }, [isSuperAdmin]);
+
+  // Tab-Level On-Demand Subscriptions with Session Caching (Phase 2 & 3)
+  const { ensureModuleSubscribed } = useData();
+  useEffect(() => {
+    switch (currentAdminView) {
+      case AppView.ADMIN_PORTAL_LEAVE_MANAGEMENT:
+        ensureModuleSubscribed('LEAVES');
+        break;
+      case AppView.ADMIN_PORTAL_ACCOUNT_UPDATE_MANAGEMENT:
+        ensureModuleSubscribed('ACCOUNT_UPDATES');
+        break;
+      case AppView.ADMIN_PORTAL_DISCIPLINARY_MANAGEMENT:
+        ensureModuleSubscribed('DISCIPLINE');
+        break;
+      case AppView.ADMIN_PORTAL_RESIGNATION_MANAGEMENT:
+        ensureModuleSubscribed('RESIGNATIONS');
+        break;
+      case AppView.ADMIN_PORTAL_DRAFTS:
+        ensureModuleSubscribed('DRAFTS');
+        break;
+      default:
+        break;
+    }
+  }, [currentAdminView, ensureModuleSubscribed]);
 
   const hasPermission = (p: Permission) => {
     if (isSuperAdmin) return true;
@@ -1182,7 +1220,9 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
         )}
 
         <div className={native ? 'native-main-content page-enter' : ''}>
-          {renderAdminContent()}
+          <Suspense fallback={<PageLoadingFallback />}>
+            {renderAdminContent()}
+          </Suspense>
         </div>
 
       </main>

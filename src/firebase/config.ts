@@ -37,6 +37,24 @@ export const db = initializeFirestore(app, {
 export const storage = getStorage(app);
 export const functions = getFunctions(app);
 
+// Initialize Firebase App Check with reCAPTCHA Enterprise (IMP-5)
+import { initializeAppCheck, ReCaptchaEnterpriseProvider, AppCheck } from 'firebase/app-check';
+export let appCheck: AppCheck | null = null;
+if (typeof window !== 'undefined') {
+    try {
+        if (import.meta.env.DEV) {
+            (self as any).FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+        }
+        appCheck = initializeAppCheck(app, {
+            provider: new ReCaptchaEnterpriseProvider('6LebggEuAAAAACif4YKDhm_yKgN03R8eTIqSVYXx'),
+            isTokenAutoRefreshEnabled: true
+        });
+        log.log('[AppCheck] reCAPTCHA Enterprise App Check initialized successfully');
+    } catch (appCheckErr) {
+        log.warn('[AppCheck] App Check initialization skipped:', appCheckErr);
+    }
+}
+
 export default app;
 
 // SECURITY: Local Development Firestore Request Guard
