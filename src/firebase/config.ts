@@ -42,6 +42,16 @@ import { initializeAppCheck, ReCaptchaEnterpriseProvider, AppCheck } from 'fireb
 export let appCheck: AppCheck | null = null;
 if (typeof window !== 'undefined') {
     try {
+        // Automatically purge any stale 403 throttled state cached by earlier key discrepancies
+        if (window.indexedDB && !sessionStorage.getItem('udf_appcheck_cache_cleared_v2')) {
+            try {
+                window.indexedDB.deleteDatabase('firebase-app-check-database');
+                sessionStorage.setItem('udf_appcheck_cache_cleared_v2', '1');
+            } catch (clearErr) {
+                // ignore
+            }
+        }
+
         if (import.meta.env.DEV) {
             (self as any).FIREBASE_APPCHECK_DEBUG_TOKEN = true;
         }
