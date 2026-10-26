@@ -161,7 +161,15 @@ const DataCorrectionPage: React.FC<DataCorrectionPageProps> = ({ sections }) => 
       // Ensure at least anonymous auth is active for Firebase rules
       await ensureAuthenticated();
 
-      const request = await getCorrectionRequest(token);
+      let request = await getCorrectionRequest(token);
+      if (!request) {
+        try {
+          const challenge = await getCorrectionChallengeClient(token);
+          if (challenge && challenge.request) {
+            request = challenge.request;
+          }
+        } catch (_) {}
+      }
       if (!request) {
         setError("Invalid correction link. This link does not exist.");
         setLoading(false);

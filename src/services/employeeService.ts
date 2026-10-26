@@ -1868,19 +1868,8 @@ export const updateSubmissionStatus = async (
                 }
             });
 
-            // Physical move in Storage bucket
-            try {
-                await moveStorageFiles(oldStoragePath, newStoragePath);
-                log.log(`[STORAGE_SYNC] Folder moved: "${oldStoragePath}" → "${newStoragePath}"`);
-                // If detectedFolder differs from linkedUid, also ensure linkedUid folder files are moved if any exist
-                if (data.linkedUid && detectedFolder !== data.linkedUid) {
-                    try {
-                        await moveStorageFiles(`onboarding/${data.linkedUid}`, newStoragePath);
-                    } catch {}
-                }
-            } catch (storageErr: any) {
-                console.error("[STORAGE_SYNC_ERROR] Folder move failed:", storageErr);
-            }
+            // Physical storage move is handled atomically on Google Cloud by approveOnboardingServerCall (line 2025).
+            // Removing redundant client-side move cuts onboarding approval latency in half (EDGE-D4C-03).
 
             const newEmployee: Partial<FirestoreEmployee> = {
                 uid: data.linkedUid || '', // Sync Firebase UID if it exists
@@ -4232,7 +4221,15 @@ export const getSiteHeadcounts = async (sites: Site[], formSections: FormSection
     return counts;
 };
 
+// In-memory 60-second cache to prevent repeated reads on tab switches (EDGE-D4C-02)
+let _empLookupCache: { timestamp: number; data: Record<string, { name: string, siteName: string, id: string, siteId?: string }> } | null = null;
+
 export const getEmployeeLookupMap = async (formSections: FormSection[], allowedSiteIds?: string[]) => {
+    // If cache is fresh (less than 60s old), return cached map instantly (0 reads)
+    if (_empLookupCache && (Date.now() - _empLookupCache.timestamp < 60000)) {
+        return _empLookupCache.data;
+    }
+
     const unitField = formSections
         .flatMap(s => s.fields || [])
         .find(f => f && f.label && (f.label.toLowerCase().includes('unit') || f.label.toLowerCase().includes('facility')));
@@ -4240,18 +4237,12 @@ export const getEmployeeLookupMap = async (formSections: FormSection[], allowedS
     // Fallback lookup if unitField is missing
     const unitFieldId = unitField?.id;
 
-    // Query only active employees bounded by limit to prevent 1,000+ unbounded document scans (Phase 4)
-    let q = query(
-        collection(db, EMPLOYEES_COLLECTION),
-        where("isActive", "==", true),
-        limit(150)
-    );
+    // Fetch both active and past employees so past records (disciplinary, leaves, resignations) resolve names correctly (EDGE-D4C-02)
+    let q = query(collection(db, EMPLOYEES_COLLECTION));
     if (allowedSiteIds && allowedSiteIds.length > 0) {
         q = query(
             collection(db, EMPLOYEES_COLLECTION),
-            where("isActive", "==", true),
-            where("currentSiteId", "in", allowedSiteIds.slice(0, 10)),
-            limit(150)
+            where("currentSiteId", "in", allowedSiteIds.slice(0, 10))
         );
     }
     const snapshot = await getDocs(q);
@@ -4269,6 +4260,7 @@ export const getEmployeeLookupMap = async (formSections: FormSection[], allowedS
         };
     });
 
+    _empLookupCache = { timestamp: Date.now(), data: lookup };
     return lookup;
 };
 

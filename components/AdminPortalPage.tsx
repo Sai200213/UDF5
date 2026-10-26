@@ -217,10 +217,18 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
     }
   }, [isSuperAdmin]);
 
-  // Tab-Level On-Demand Subscriptions with Session Caching (Phase 2 & 3)
+  // Tab-Level On-Demand Subscriptions with Session Caching (Phase 2 & 3 / EDGE-D4C-01)
   const { ensureModuleSubscribed } = useData();
   useEffect(() => {
     switch (currentAdminView) {
+      case AppView.ADMIN_DASHBOARD:
+        ensureModuleSubscribed('LEAVES');
+        ensureModuleSubscribed('ACCOUNT_UPDATES');
+        ensureModuleSubscribed('RESIGNATIONS');
+        break;
+      case AppView.ADMIN_PORTAL_MASTER_EMPLOYEE_LIST:
+        ensureModuleSubscribed('LEAVES');
+        break;
       case AppView.ADMIN_PORTAL_LEAVE_MANAGEMENT:
         ensureModuleSubscribed('LEAVES');
         break;

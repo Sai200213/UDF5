@@ -1054,11 +1054,8 @@ const App: React.FC = () => {
     let unsubSubmissions = () => { };
 
     if (authUser.type === UserType.ADMIN) {
-      // On-demand: Only subscribe when admin visits submission review or site management, then keep cached for the session
-      const shouldSubscribe = 
-        currentView === AppView.ADMIN_PORTAL_SUBMISSION_REVIEW || 
-        currentView === AppView.ADMIN_PORTAL_SITE_MANAGEMENT || 
-        hasSubmissionsSubscribedRef.current;
+      // Subscribe for authenticated admins so cross-tab dependencies (Drafts, Master List, Profile) have data (EDGE-D4C-01)
+      const shouldSubscribe = Boolean(authUser);
 
       if (shouldSubscribe) {
         hasSubmissionsSubscribedRef.current = true;
