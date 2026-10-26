@@ -111,33 +111,47 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (!user || user.type !== UserType.ADMIN || !user.id) return;
 
         let unsubStaff: (() => void) | null = null;
+        let unsubUsers: (() => void) | null = null;
         const listenForClaimUpdates = async () => {
             try {
                 const { db } = await import('../firebase/config');
                 const { doc, onSnapshot } = await import('firebase/firestore');
 
+                const handleProfileData = async (data: Record<string, any>) => {
+                    // If claims were updated on server, refresh JWT token immediately
+                    if (data.claimsUpdatedAt) {
+                        try {
+                            log.log('AuthContext: Detected claimsUpdatedAt update, refreshing Firebase Auth JWT token...');
+                            await auth.currentUser?.getIdToken(true);
+                        } catch (tokenErr) {
+                            log.warn('AuthContext: Could not refresh token on claims change:', tokenErr);
+                        }
+                    }
+                    // Update local user state if role, permissions, or sites changed
+                    if (data.roleId !== user.roleId || JSON.stringify(data.sitesManaged) !== JSON.stringify(user.sitesManaged)) {
+                        setUser(prev => prev ? ({
+                            ...prev,
+                            roleId: data.roleId || prev.roleId,
+                            sitesManaged: data.sitesManaged || prev.sitesManaged,
+                            permissionOverrides: data.permissionOverrides || prev.permissionOverrides
+                        }) : null);
+                    }
+                };
+
                 const staffRef = doc(db, 'staff_accounts', user.id);
                 unsubStaff = onSnapshot(staffRef, async (snap) => {
                     if (snap.exists()) {
-                        const data = snap.data();
-                        // If claims were updated on server, refresh JWT token immediately
-                        if (data.claimsUpdatedAt) {
-                            try {
-                                log.log('AuthContext: Detected claimsUpdatedAt update, refreshing Firebase Auth JWT token...');
-                                await auth.currentUser?.getIdToken(true);
-                            } catch (tokenErr) {
-                                log.warn('AuthContext: Could not refresh token on claims change:', tokenErr);
+                        await handleProfileData(snap.data());
+                    } else if (!unsubUsers) {
+                        // Fallback listener for users/{user.id} (e.g. SuperAdmin)
+                        const userDocRef = doc(db, 'users', user.id);
+                        unsubUsers = onSnapshot(userDocRef, async (uSnap) => {
+                            if (uSnap.exists()) {
+                                await handleProfileData(uSnap.data());
                             }
-                        }
-                        // Update local user state if role, permissions, or sites changed
-                        if (data.roleId !== user.roleId || JSON.stringify(data.sitesManaged) !== JSON.stringify(user.sitesManaged)) {
-                            setUser(prev => prev ? ({
-                                ...prev,
-                                roleId: data.roleId || prev.roleId,
-                                sitesManaged: data.sitesManaged || prev.sitesManaged,
-                                permissionOverrides: data.permissionOverrides || prev.permissionOverrides
-                            }) : null);
-                        }
+                        }, (uErr) => {
+                            log.warn('AuthContext: users claim listener warning:', uErr);
+                        });
                     }
                 }, (err) => {
                     log.warn('AuthContext: staff_accounts claim listener warning:', err);
@@ -150,6 +164,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         listenForClaimUpdates();
         return () => {
             if (unsubStaff) unsubStaff();
+            if (unsubUsers) unsubUsers();
         };
     }, [user?.id, user?.type]);
 

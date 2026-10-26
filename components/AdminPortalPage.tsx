@@ -277,7 +277,26 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
   const handleNotificationClick = (notif: Notification) => {
     markNotificationAsRead(notif.id);
     if (notif.link) {
-      navigateTo(notif.link as AppView);
+      let targetView: AppView | null = null;
+      if (Object.values(AppView).includes(notif.link as AppView)) {
+        targetView = notif.link as AppView;
+      } else {
+        const adminLinkMap: Record<string, AppView> = {
+          '/admin/leave-requests': AppView.ADMIN_PORTAL_LEAVE_MANAGEMENT,
+          '/admin/leaves': AppView.ADMIN_PORTAL_LEAVE_MANAGEMENT,
+          '/admin/account-updates': AppView.ADMIN_PORTAL_ACCOUNT_UPDATE_MANAGEMENT,
+          '/admin/updates': AppView.ADMIN_PORTAL_ACCOUNT_UPDATE_MANAGEMENT,
+          '/admin/resignation': AppView.ADMIN_PORTAL_RESIGNATION_MANAGEMENT,
+          '/admin/resignations': AppView.ADMIN_PORTAL_RESIGNATION_MANAGEMENT,
+          '/admin/submissions': AppView.ADMIN_PORTAL_SUBMISSION_REVIEW,
+          '/admin/employees': AppView.ADMIN_PORTAL_MASTER_EMPLOYEE_LIST,
+          '/admin/dashboard': AppView.ADMIN_DASHBOARD,
+        };
+        targetView = adminLinkMap[notif.link] || null;
+      }
+      if (targetView) {
+        navigateTo(targetView);
+      }
       setIsNotificationOpen(false);
     }
   };

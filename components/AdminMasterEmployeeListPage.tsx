@@ -12,6 +12,7 @@ import { v4 as uuidv4 } from 'uuid';
 import BulkImportModal from './BulkImportModal';
 import { BulkImportResult } from '../src/utils/bulkImportUtils';
 import SecureDocumentLink from '../src/components/common/SecureDocumentLink';
+import { getBatchSignedURLs } from '../src/services/storageService';
 import RequestCorrectionModal from './common/RequestCorrectionModal';
 import { User as SystemUser } from '../types';
 import { useData } from '../src/contexts/DataContext';
@@ -106,6 +107,33 @@ const AdminMasterEmployeeListPage: React.FC<AdminMasterEmployeeListPageProps> = 
         }
       } else {
         setNewJoiningDateValue('');
+      }
+
+      // Pre-warm batch signed URLs for all documents in the employee profile (NEW-96EF-07)
+      const pathsToWarm: string[] = [];
+      const collectPaths = (data: any) => {
+        if (!data || typeof data !== 'object') return;
+        for (const val of Object.values(data)) {
+          if (!val) continue;
+          if (typeof val === 'string') {
+            if (val.startsWith('onboarding/') || val.startsWith('employees/') || val.startsWith('gs://') || /\.(pdf|png|jpg|jpeg|webp)$/i.test(val)) {
+              pathsToWarm.push(val);
+            }
+          } else if (typeof val === 'object') {
+            if ('storagePath' in val && typeof (val as any).storagePath === 'string') {
+              pathsToWarm.push((val as any).storagePath);
+            }
+          }
+        }
+      };
+      collectPaths(managementTarget.data);
+      collectPaths((managementTarget as any).profileData);
+      collectPaths((managementTarget as any).formData);
+      const uniquePaths = Array.from(new Set(pathsToWarm));
+      if (uniquePaths.length > 0) {
+        getBatchSignedURLs(uniquePaths).catch(err => {
+          console.warn('[AdminMasterEmployeeListPage] Failed to pre-warm signed URLs:', err);
+        });
       }
     }
   }, [managementTarget, isManagementModalOpen]);

@@ -11,6 +11,7 @@ import * as XLSX from 'xlsx';
 import { v4 as uuidv4 } from 'uuid';
 import PremiumSelect from './common/PremiumSelect';
 import SecureDocumentLink, { SecureImage } from '../src/components/common/SecureDocumentLink';
+import { getBatchSignedURLs } from '../src/services/storageService';
 import RequestCorrectionModal from './common/RequestCorrectionModal';
 import { defaultSites } from '../src/constants/defaults';
 import { getEffectiveApprovalLevel, isRoleAssignedToSite } from '../src/utils/workflowHelper';
@@ -578,6 +579,36 @@ const AdminReviewSubmissionsPage: React.FC<AdminReviewSubmissionsPageProps> = ({
     }
     return () => { active = false; };
   }, [isBiodataModalOpen, selectedSubmissionForDetails]);
+
+  // Pre-warm batch signed URLs when submission details modal or biodata modal opens (NEW-96EF-07)
+  useEffect(() => {
+    if (!selectedSubmissionForDetails || (!isDetailsModalOpen && !isBiodataModalOpen)) return;
+    const pathsToWarm: string[] = [];
+    const collectPaths = (data: any) => {
+      if (!data || typeof data !== 'object') return;
+      for (const val of Object.values(data)) {
+        if (!val) continue;
+        if (typeof val === 'string') {
+          if (val.startsWith('onboarding/') || val.startsWith('employees/') || val.startsWith('gs://') || /\.(pdf|png|jpg|jpeg|webp)$/i.test(val)) {
+            pathsToWarm.push(val);
+          }
+        } else if (typeof val === 'object') {
+          if ('storagePath' in val && typeof (val as any).storagePath === 'string') {
+            pathsToWarm.push((val as any).storagePath);
+          }
+        }
+      }
+    };
+    collectPaths(selectedSubmissionForDetails.data);
+    collectPaths((selectedSubmissionForDetails as any).profileData);
+    collectPaths((selectedSubmissionForDetails as any).formData);
+    const uniquePaths = Array.from(new Set(pathsToWarm));
+    if (uniquePaths.length > 0) {
+      getBatchSignedURLs(uniquePaths).catch(err => {
+        console.warn('[AdminReviewSubmissionsPage] Failed to pre-warm signed URLs:', err);
+      });
+    }
+  }, [selectedSubmissionForDetails, isDetailsModalOpen, isBiodataModalOpen]);
 
   const handlePrintBiodata = async () => {
     if (!selectedSubmissionForDetails) return;

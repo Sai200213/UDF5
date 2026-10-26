@@ -797,16 +797,12 @@ const DataCorrectionPage: React.FC<DataCorrectionPageProps> = ({ sections }) => 
     setSubmitProgress({});
 
     try {
-      if (sessionToken) {
-        await submitCorrectionServerClient(token, sessionToken, formData);
-      } else {
-        await submitCorrectionResponse(token, formData, (fieldId, status, percent) => {
-          setSubmitProgress(prev => ({
-            ...prev,
-            [fieldId]: { status, percent }
-          }));
-        });
-      }
+      await submitCorrectionResponse(token, formData, (fieldId, status, percent) => {
+        setSubmitProgress(prev => ({
+          ...prev,
+          [fieldId]: { status, percent }
+        }));
+      }, sessionToken);
 
       setSuccess(true);
     } catch (err: any) {

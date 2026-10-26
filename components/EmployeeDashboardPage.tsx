@@ -113,7 +113,25 @@ const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = (props) => {
   const handleNotificationClick = (notif: Notification) => {
     markNotificationAsRead(notif.id);
     if (notif.link) {
-      navigateTo(notif.link as AppView);
+      let targetView: AppView | null = null;
+      if (Object.values(AppView).includes(notif.link as AppView)) {
+        targetView = notif.link as AppView;
+      } else {
+        const linkMap: Record<string, AppView> = {
+          '/employee/leave-requests': AppView.EMPLOYEE_LEAVE_REQUESTS,
+          '/employee/leaves': AppView.EMPLOYEE_LEAVE_REQUESTS,
+          '/employee/account-updates': AppView.EMPLOYEE_ACCOUNT_UPDATES,
+          '/employee/updates': AppView.EMPLOYEE_ACCOUNT_UPDATES,
+          '/employee/resignation': AppView.EMPLOYEE_RESIGNATION,
+          '/employee/resignations': AppView.EMPLOYEE_RESIGNATION,
+          '/employee/profile': AppView.EMPLOYEE_PROFILE,
+          '/employee/dashboard': AppView.EMPLOYEE_DASHBOARD,
+        };
+        targetView = linkMap[notif.link] || null;
+      }
+      if (targetView) {
+        navigateTo(targetView);
+      }
       setIsNotificationOpen(false);
     }
   };

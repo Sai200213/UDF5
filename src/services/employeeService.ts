@@ -1038,24 +1038,26 @@ export const submitEmployeeForm = async (
         // Mark finalizing step as done immediately (candidate never waits)
         onProgress?.('finalizing', 'done');
 
-        // Detached background pipeline: Sync files to Google Drive first so Drive links are saved on the submission, then sync to Google Form
+        // Detached background pipeline: Cloud Function trigger `onSubmissionCreated` automatically executes
+        // native Drive backup & Sheets sync. We check status after a grace period as a safety fallback.
         setTimeout(async () => {
             try {
-                log.log(`[BACKGROUND_PIPELINE] Starting background Drive backup for ${submissionId}...`);
-                await syncDriveFolder(submissionId);
-                log.log(`[BACKGROUND_PIPELINE] ✅ Completed background Drive backup for ${submissionId}`);
-            } catch (syncErr) {
-                console.warn(`[BACKGROUND_PIPELINE] Background Drive sync error for ${submissionId}:`, syncErr);
-            } finally {
-                try {
-                    log.log(`[BACKGROUND_PIPELINE] Syncing submission (with Drive links) to Google Form for ${submissionId}...`);
-                    await syncSubmissionToGoogleForm(submissionId);
-                    log.log(`[BACKGROUND_PIPELINE] ✅ Google Form sync completed for ${submissionId}`);
-                } catch (formErr) {
-                    console.warn(`[BACKGROUND_PIPELINE] Google Form sync error for ${submissionId}:`, formErr);
+                const checkSnap = await getDoc(doc(db, SUBMISSIONS_COLLECTION, submissionId));
+                if (checkSnap.exists()) {
+                    const snapData = checkSnap.data();
+                    if (snapData.driveBackupStatus === 'completed' && snapData.googleFormSyncStatus === 'synced') {
+                        log.log(`[BACKGROUND_PIPELINE] Server trigger already synced Drive & Sheets for ${submissionId}`);
+                        return;
+                    }
+                    if (!snapData.driveBackupStatus || snapData.driveBackupStatus === 'failed') {
+                        log.log(`[BACKGROUND_PIPELINE] Server trigger pending, invoking fallback syncDriveFolder for ${submissionId}...`);
+                        await syncDriveFolder(submissionId);
+                    }
                 }
+            } catch (syncErr) {
+                console.warn(`[BACKGROUND_PIPELINE] Background sync fallback check for ${submissionId}:`, syncErr);
             }
-        }, 100);
+        }, 5000);
 
         return submissionId;
     } catch (error) {
@@ -1554,6 +1556,12 @@ export interface ApproveOnboardingServerParams {
         pendingProfileNote: string;
     };
     comments?: string;
+    passwordHash?: string;
+    isDefaultPassword?: boolean;
+    aadhaarNumber?: string | null;
+    panNumber?: string | null;
+    uanNumber?: string | null;
+    phoneNumber?: string | null;
 }
 
 export const approveOnboardingServerCall = async (
@@ -2025,7 +2033,13 @@ export const updateSubmissionStatus = async (
                         pendingProfileFields: profileCompletionData.pendingProfileFields || [],
                         pendingProfileNote: profileCompletionData.pendingProfileNote || ''
                     } : undefined,
-                    comments: adminComments
+                    comments: adminComments,
+                    passwordHash: newEmployee.passwordHash,
+                    isDefaultPassword: newEmployee.isDefaultPassword,
+                    aadhaarNumber: liveAadhaar || null,
+                    panNumber: livePan || null,
+                    uanNumber: liveUan || null,
+                    phoneNumber: livePhone || null
                 });
                 serverApproved = true;
                 log.log(`[approveOnboardingServerCall] Server state machine committed successfully for ${empId}`);
@@ -5037,7 +5051,8 @@ export const submitCorrectionServerClient = async (token: string, sessionToken: 
 export const submitCorrectionResponse = async (
     requestId: string,
     updatedData: Record<string, any>,
-    onProgress?: (fieldId: string, status: 'loading' | 'done' | 'error', percent?: number) => void
+    onProgress?: (fieldId: string, status: 'loading' | 'done' | 'error', percent?: number) => void,
+    sessionToken?: string | null
 ): Promise<void> => {
     const requestRef = doc(db, CORRECTION_REQUESTS_COLLECTION, requestId);
     const requestSnap = await getDoc(requestRef);
@@ -5302,49 +5317,25 @@ export const submitCorrectionResponse = async (
         }
     }
     
-    // Perform Firestore update with sanitized payload (Firestore rejects undefined)
-    const cleanUpdates = JSON.parse(JSON.stringify(updates));
-    await updateDoc(targetRef, cleanUpdates);
-
-    // Cross-sync: Re-evaluate any other pending submissions that previously matched targetId
+    // Perform update via secure Cloud Function (Admin SDK) to bypass client security rule blocks
     try {
-        const qPending = query(
-            collection(db, SUBMISSIONS_COLLECTION),
-            where("status", "==", "Pending Review")
-        );
-        const pendingSnap = await getDocs(qPending);
-        for (const docSnap of pendingSnap.docs) {
-            if (docSnap.id === req.targetId) continue;
-            const d = docSnap.data() as any;
-            const hasTargetRef = d.duplicateCheck?.matches?.some((m: any) => m.submissionId === req.targetId) ||
-                                 d.duplicateCheck?.submissionId === req.targetId;
-            if (hasTargetRef) {
-                const dForm = { ...(d.formData || {}), ...(d.data || {}) };
-                const dSections = d.originalFormSections || [];
-                const dPan = d.panNumber || getApplicantPAN(dForm, dSections);
-                const dAadhaar = d.aadhaarNumber || getApplicantAadhaar(dForm, dSections);
-                const dUan = d.uanNumber || getApplicantUAN(dForm, dSections);
-                const dPhone = d.phoneNumber || getApplicantPhone(dForm, dSections);
-                const freshDup = await checkApplicantDuplicates({
-                    aadhaar: dAadhaar,
-                    pan: dPan,
-                    uan: dUan,
-                    phone: dPhone,
-                    currentSubId: docSnap.id
-                });
-                const cleanFreshDup = JSON.parse(JSON.stringify(freshDup));
-                await updateDoc(doc(db, SUBMISSIONS_COLLECTION, docSnap.id), { duplicateCheck: cleanFreshDup });
-            }
+        await submitCorrectionServerClient(requestId, sessionToken || '', processedData);
+        log.log(`[submitCorrectionResponse] Successfully processed correction via submitCorrectionServerClient for ${requestId}`);
+    } catch (srvErr) {
+        log.warn("[submitCorrectionResponse] Server call failed, attempting direct update fallback:", srvErr);
+        // Direct Firestore fallback for authorized admin / owner sessions
+        try {
+            const cleanUpdates = JSON.parse(JSON.stringify(updates));
+            await updateDoc(targetRef, cleanUpdates);
+            await updateDoc(requestRef, {
+                status: 'completed',
+                completedAt: new Date().toISOString()
+            });
+        } catch (clientErr) {
+            log.error("[submitCorrectionResponse] Direct client fallback update failed:", clientErr);
+            throw srvErr;
         }
-    } catch (crossErr) {
-        log.warn("Error cross-updating pending submission duplicates:", crossErr);
     }
-    
-    // 3. Mark correction request as completed
-    await updateDoc(requestRef, {
-        status: 'completed',
-        completedAt: new Date().toISOString()
-    });
 };
 
 

@@ -3573,10 +3573,10 @@ exports.onRoleWritten = onDocumentWritten("roles/{roleId}", async (event) => {
 });
 
 /**
- * onStaffAccountWritten
- * Triggered whenever a staff profile in /staff_accounts/{staffId} is updated or deleted.
+ * handleStaffOrUserWritten
+ * Helper to recompute custom claims whenever staff_accounts, users, or staff document is updated.
  */
-exports.onStaffAccountWritten = onDocumentWritten("staff_accounts/{staffId}", async (event) => {
+async function handleStaffOrUserWritten(event, collectionName) {
     const staffId = event.params.staffId;
     const afterData = event.data?.after?.data();
     const beforeData = event.data?.before?.data();
@@ -3590,7 +3590,7 @@ exports.onStaffAccountWritten = onDocumentWritten("staff_accounts/{staffId}", as
         }
     }
 
-    console.log(`[TRIGGER: onStaffAccountWritten] Staff account ${staffId} updated, recomputing claims...`);
+    console.log(`[TRIGGER: handleStaffOrUserWritten] ${collectionName}/${staffId} updated, recomputing claims...`);
     try {
         let authUid = afterData?.uid || staffId;
         let authUser = await admin.auth().getUser(authUid).catch(() => null);
@@ -3603,18 +3603,30 @@ exports.onStaffAccountWritten = onDocumentWritten("staff_accounts/{staffId}", as
         if (authUser) {
             if (!event.data?.after?.exists) {
                 await admin.auth().setCustomUserClaims(authUid, {});
-                console.log(`[TRIGGER: onStaffAccountWritten] Cleared claims for deleted staff ${authUid}`);
+                console.log(`[TRIGGER: handleStaffOrUserWritten] Cleared claims for deleted doc ${collectionName}/${authUid}`);
             } else {
                 await computeAndApplyUserClaims(authUid, staffId, afterData);
                 await event.data.after.ref.update({
                     claimsUpdatedAt: admin.firestore.FieldValue.serverTimestamp()
                 });
-                console.log(`[TRIGGER: onStaffAccountWritten] Updated claims for ${authUid}`);
+                console.log(`[TRIGGER: handleStaffOrUserWritten] Updated claims for ${authUid} via ${collectionName}`);
             }
         }
     } catch (err) {
-        console.error(`[TRIGGER: onStaffAccountWritten] Error for ${staffId}:`, err);
+        console.error(`[TRIGGER: handleStaffOrUserWritten] Error for ${collectionName}/${staffId}:`, err);
     }
+}
+
+exports.onStaffAccountWritten = onDocumentWritten("staff_accounts/{staffId}", async (event) => {
+    return handleStaffOrUserWritten(event, "staff_accounts");
+});
+
+exports.onUserAccountWritten = onDocumentWritten("users/{staffId}", async (event) => {
+    return handleStaffOrUserWritten(event, "users");
+});
+
+exports.onLegacyStaffWritten = onDocumentWritten("staff/{staffId}", async (event) => {
+    return handleStaffOrUserWritten(event, "staff");
 });
 
 /**
@@ -3857,8 +3869,8 @@ exports.verifyCorrectionIdentity = functions.https.onCall(async (request) => {
  */
 exports.submitCorrectionServer = functions.https.onCall(async (request) => {
     const { token, sessionToken, updatedFields } = request.data || {};
-    if (!token || !sessionToken || !updatedFields || typeof updatedFields !== 'object') {
-        throw new functions.https.HttpsError('invalid-argument', 'Token, sessionToken, and updatedFields are required.');
+    if (!token || !updatedFields || typeof updatedFields !== 'object') {
+        throw new functions.https.HttpsError('invalid-argument', 'Token and updatedFields are required.');
     }
 
     const cleanToken = token.trim();
@@ -3876,40 +3888,66 @@ exports.submitCorrectionServer = functions.https.onCall(async (request) => {
         throw new functions.https.HttpsError('failed-precondition', 'Correction request is no longer pending.');
     }
 
-    // Verify Session Token HMAC and expiry (valid for 2 hours)
-    const crypto = require('crypto');
-    const [tokenHash, tsStr] = String(sessionToken).split('.');
-    const timestamp = parseInt(tsStr, 10);
-    if (!tokenHash || isNaN(timestamp) || (Date.now() - timestamp > 2 * 60 * 60 * 1000)) {
-        throw new functions.https.HttpsError('unauthenticated', 'Correction session has expired. Please verify again.');
-    }
-
-    const expectedPayload = `${cleanToken}:${timestamp}:${reqData.targetId}`;
-    const expectedHash = crypto.createHmac('sha256', 'UDF_CORRECTION_SESSION_KEY_2026_@DELTA').update(expectedPayload).digest('hex');
-
-    if (tokenHash !== expectedHash) {
-        throw new functions.https.HttpsError('permission-denied', 'Invalid correction session token.');
-    }
-
+    // Resolve target record first
     const targetCollection = reqData.targetType === 'employee' ? 'employees' : 'onboarding_submissions';
-    const targetRef = db.collection(targetCollection).doc(reqData.targetId);
-    const targetSnap = await targetRef.get();
+    let targetRef = db.collection(targetCollection).doc(reqData.targetId);
+    let targetSnap = await targetRef.get();
+
+    if (!targetSnap.exists && reqData.targetType === 'employee') {
+        const qSnap = await db.collection('employees').where('employeeId', '==', reqData.targetId).limit(1).get();
+        if (!qSnap.empty) {
+            targetRef = qSnap.docs[0].ref;
+            targetSnap = qSnap.docs[0];
+        }
+    }
 
     if (!targetSnap.exists) {
         throw new functions.https.HttpsError('not-found', `Target ${reqData.targetType} record not found.`);
     }
 
     const targetData = targetSnap.data();
+
+    // Authorization: Either valid sessionToken HMAC OR authenticated caller matching the record or admin
+    let isAuthorized = false;
+    if (sessionToken) {
+        const crypto = require('crypto');
+        const [tokenHash, tsStr] = String(sessionToken).split('.');
+        const timestamp = parseInt(tsStr, 10);
+        if (tokenHash && !isNaN(timestamp) && (Date.now() - timestamp <= 2 * 60 * 60 * 1000)) {
+            const expectedPayload = `${cleanToken}:${timestamp}:${reqData.targetId}`;
+            const expectedHash = crypto.createHmac('sha256', 'UDF_CORRECTION_SESSION_KEY_2026_@DELTA').update(expectedPayload).digest('hex');
+            if (tokenHash === expectedHash) {
+                isAuthorized = true;
+            }
+        }
+    }
+
+    if (!isAuthorized && request.auth) {
+        const callerUid = request.auth.uid;
+        const callerEmail = (request.auth.token?.email || '').toLowerCase().trim();
+        const targetEmail = (targetData.linkedGoogleEmail || targetData.email || reqData.linkedGoogleEmail || '').toLowerCase().trim();
+        const isOwner = callerUid === targetData.uid || callerUid === targetData.linkedUid || (callerEmail && callerEmail === targetEmail);
+        const isAdmin = request.auth.token?.isSuperAdmin === true || (Array.isArray(request.auth.token?.permissions) && request.auth.token.permissions.includes('SUBMISSIONS_CREATE_CORRECTION_LINK'));
+        if (isOwner || isAdmin) {
+            isAuthorized = true;
+        }
+    }
+
+    if (!isAuthorized) {
+        throw new functions.https.HttpsError('permission-denied', 'Correction session expired or invalid. Please verify again.');
+    }
+
     const updates = {
         updatedAt: new Date().toISOString(),
+        lastUpdated: new Date().toISOString(),
         activeCorrectionToken: admin.firestore.FieldValue.delete()
     };
 
-    // Filter updated fields to only allow those requested in reqData.requestedFields
-    const allowedFields = new Set(Array.isArray(reqData.requestedFields) ? reqData.requestedFields : []);
+    // Filter updated fields to only allow those requested in reqData.requestedFields (or all if empty)
+    const allowedFields = Array.isArray(reqData.requestedFields) && reqData.requestedFields.length > 0 ? new Set(reqData.requestedFields) : null;
     const processedData = {};
     for (const [k, v] of Object.entries(updatedFields)) {
-        if (allowedFields.has(k)) {
+        if (!allowedFields || allowedFields.has(k)) {
             processedData[k] = v;
         }
     }
@@ -3926,6 +3964,18 @@ exports.submitCorrectionServer = functions.https.onCall(async (request) => {
                 updates[`data.${key}`] = value;
             }
         }
+    }
+
+    // Sync top-level identifiers if modified
+    for (const [fieldKey, fieldVal] of Object.entries(processedData)) {
+        const strVal = typeof fieldVal === 'string' ? fieldVal.trim() : (fieldVal?.value || '');
+        if (!strVal) continue;
+        const keyLower = fieldKey.toLowerCase();
+        if (/pan/i.test(keyLower) || fieldKey === 'da8edb18-4bed-41ca-8233-2280b97dac8d') updates.panNumber = strVal.toUpperCase();
+        if (/aadhaar|aadhar/i.test(keyLower) || fieldKey === '18855ee9-0d66-41d6-988b-128b776a8c5b') updates.aadhaarNumber = strVal;
+        if (/uan/i.test(keyLower) || fieldKey === 'f6665f3e-98f4-4d92-8b53-adcaa1993bbe') updates.uanNumber = strVal;
+        if (/phone|mobile|contact/i.test(keyLower) || fieldKey === 'eb3617dc-9f1d-475d-a2db-005b6bc2500c') updates.phoneNumber = strVal;
+        if (/name|applicant_?name/i.test(keyLower) && !/father|mother|spouse|reference|bank/i.test(keyLower)) updates.applicantName = strVal;
     }
 
     // Update target document
@@ -4309,18 +4359,29 @@ exports.processRequestReviewServer = functions.https.onCall(async (request) => {
         }
     } else if (normalizedAction === 'APPROVE') {
         if (!isBypass && currentLevel < maxLevels) {
-            // Advance to next workflow level
-            newLevel = currentLevel + 1;
-            newStatus = 'Pending';
-            const nextLvlConfig = levels.find(l => l.level === newLevel);
-            if (nextLvlConfig) {
-                nextLevelRoleId = nextLvlConfig.roleId;
+            // Advance to next workflow level that has an assigned role
+            let nextLvl = currentLevel + 1;
+            let foundNext = levels.find(l => l.level === nextLvl && l.roleId);
+            while (!foundNext && nextLvl < maxLevels) {
+                nextLvl++;
+                foundNext = levels.find(l => l.level === nextLvl && l.roleId);
+            }
+            if (foundNext) {
+                newLevel = nextLvl;
+                newStatus = 'Pending';
+                nextLevelRoleId = foundNext.roleId;
+            } else {
+                // No higher active levels configured, advance directly to Final Approval
+                newStatus = 'Approved';
+                newLevel = maxLevels;
             }
         } else {
             // Final Approval
             newStatus = 'Approved';
             newLevel = maxLevels;
+        }
 
+        if (newStatus === 'Approved') {
             if (collectionName === 'leave_requests') {
                 const [sY, sM, sD] = String(reqData.startDate || '').split('-').map(Number);
                 const [eY, eM, eD] = String(reqData.endDate || '').split('-').map(Number);
@@ -4354,23 +4415,37 @@ exports.processRequestReviewServer = functions.https.onCall(async (request) => {
                                 [`data.${fieldId}`]: requestedValue,
                                 lastUpdated: new Date().toISOString()
                             };
-                            const ed = empSnap.data();
-                            const fIdLower = fieldId.toLowerCase();
-                            if (/pan/i.test(fIdLower)) empUpdates.panNumber = requestedValue;
-                            if (/aadhaar|aadhar/i.test(fIdLower)) empUpdates.aadhaarNumber = requestedValue;
-                            if (/uan/i.test(fIdLower)) empUpdates.uanNumber = requestedValue;
-                            if (/phone|mobile/i.test(fIdLower)) empUpdates.phoneNumber = requestedValue;
-                            if (/name/i.test(fIdLower)) empUpdates.applicantName = requestedValue;
+
+                            // Comprehensive matching: field ID, label, name, and standard UUIDs
+                            const checkText = `${fieldId} ${reqData.fieldLabel || ''} ${reqData.fieldName || ''}`.toLowerCase();
+                            if (/pan/i.test(checkText)) empUpdates.panNumber = String(requestedValue).toUpperCase().trim();
+                            if (/aadhaar|aadhar/i.test(checkText)) empUpdates.aadhaarNumber = String(requestedValue).replace(/\s+/g, '');
+                            if (/uan/i.test(checkText)) empUpdates.uanNumber = String(requestedValue).replace(/\s+/g, '');
+                            if (/esic/i.test(checkText)) empUpdates.esicNumber = String(requestedValue).trim();
+                            if (/phone|mobile/i.test(checkText)) empUpdates.phoneNumber = String(requestedValue).trim();
+                            if (/\bname\b|applicant/i.test(checkText) && !/father|mother|spouse|guardian|nominee/i.test(checkText)) {
+                                empUpdates.applicantName = requestedValue;
+                            }
+                            if (/bank\s*acc|account\s*num/i.test(checkText)) empUpdates.bankAccountNumber = requestedValue;
+                            if (/ifsc/i.test(checkText)) empUpdates.ifscCode = String(requestedValue).toUpperCase().trim();
 
                             batch.update(empSnap.ref, empUpdates);
 
                             const subSnap = await resolveSubmissionDocAdmin(db, reqData.employeeId, empSnap.id);
                             if (subSnap && subSnap.exists) {
-                                batch.update(subSnap.ref, {
+                                const subUpdates = {
                                     [`formData.${fieldId}`]: requestedValue,
                                     [`data.${fieldId}`]: requestedValue,
                                     lastUpdated: new Date().toISOString()
-                                });
+                                };
+                                if (empUpdates.panNumber) subUpdates.panNumber = empUpdates.panNumber;
+                                if (empUpdates.aadhaarNumber) subUpdates.aadhaarNumber = empUpdates.aadhaarNumber;
+                                if (empUpdates.uanNumber) subUpdates.uanNumber = empUpdates.uanNumber;
+                                if (empUpdates.esicNumber) subUpdates.esicNumber = empUpdates.esicNumber;
+                                if (empUpdates.phoneNumber) subUpdates.phoneNumber = empUpdates.phoneNumber;
+                                if (empUpdates.applicantName) subUpdates.applicantName = empUpdates.applicantName;
+
+                                batch.update(subSnap.ref, subUpdates);
                             }
                         }
                     });
@@ -4474,16 +4549,22 @@ exports.processRequestReviewServer = functions.https.onCall(async (request) => {
     }
 
     const notifLinks = {
-        'leave_requests': '/employee/leave-requests',
-        'account_updates': '/employee/account-updates',
-        'resignations': '/employee/resignation'
+        'leave_requests': 'EMPLOYEE_LEAVE_REQUESTS',
+        'account_updates': 'EMPLOYEE_ACCOUNT_UPDATES',
+        'resignations': 'EMPLOYEE_RESIGNATION'
+    };
+
+    const adminNotifLinks = {
+        'leave_requests': 'ADMIN_PORTAL_LEAVE_MANAGEMENT',
+        'account_updates': 'ADMIN_PORTAL_ACCOUNT_UPDATE_MANAGEMENT',
+        'resignations': 'ADMIN_PORTAL_RESIGNATION_MANAGEMENT'
     };
 
     batch.set(notifRef, {
         targetUserId: reqData.employeeId,
         message: empMsg,
         type: newStatus === 'Approved' ? 'success' : (newStatus === 'Rejected' ? 'error' : 'info'),
-        link: notifLinks[collectionName] || null,
+        link: notifLinks[collectionName] || 'EMPLOYEE_DASHBOARD',
         read: false,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         timestamp: new Date().toISOString()
@@ -4496,7 +4577,7 @@ exports.processRequestReviewServer = functions.https.onCall(async (request) => {
             targetUserId: `ROLE:${nextLevelRoleId}`,
             message: `Pending ${modId.replace('_', ' ')} Approval for ${reqData.employeeName || reqData.employeeId} (Level ${newLevel})`,
             type: 'info',
-            link: `/admin/${modId.toLowerCase().replace('_', '-')}`,
+            link: adminNotifLinks[collectionName] || 'ADMIN_DASHBOARD',
             read: false,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
             timestamp: new Date().toISOString()
@@ -4646,9 +4727,49 @@ exports.approveOnboardingServer = functions.https.onCall(async (request) => {
             await file.copy(destPath);
             await file.delete().catch(() => {});
         }
+        if (subData.linkedUid && subData.linkedUid !== submissionId) {
+            const oldUidPath = `onboarding/${subData.linkedUid}`;
+            const [uidFiles] = await bucket.getFiles({ prefix: `${oldUidPath}/` });
+            for (const file of uidFiles) {
+                const destPath = file.name.replace(oldUidPath, newStoragePath);
+                await file.copy(destPath);
+                await file.delete().catch(() => {});
+            }
+        }
     } catch (storageErr) {
         console.warn(`[approveOnboardingServer] Storage move warning for ${submissionId}:`, storageErr.message);
     }
+
+    // Recursively rewrite any storage paths in profileData from onboarding/ to employees/{submissionId}/joining
+    const oldPrefixes = [oldStoragePath];
+    if (subData.linkedUid && subData.linkedUid !== submissionId) {
+        oldPrefixes.push(`onboarding/${subData.linkedUid}`);
+    }
+
+    function rewriteStoragePathsDeep(target) {
+        if (!target) return target;
+        if (typeof target === 'string') {
+            for (const oldPref of oldPrefixes) {
+                if (target.startsWith(oldPref)) {
+                    return target.replace(oldPref, newStoragePath);
+                }
+            }
+            return target;
+        }
+        if (Array.isArray(target)) {
+            return target.map(item => rewriteStoragePathsDeep(item));
+        }
+        if (typeof target === 'object') {
+            const out = {};
+            for (const [k, v] of Object.entries(target)) {
+                out[k] = rewriteStoragePathsDeep(v);
+            }
+            return out;
+        }
+        return target;
+    }
+
+    const migratedProfileData = rewriteStoragePathsDeep(updatedProfileData);
 
     // Construct new Employee record
     const empDocRef = db.collection('employees').doc(submissionId);
@@ -4656,8 +4777,8 @@ exports.approveOnboardingServer = functions.https.onCall(async (request) => {
         uid: subData.linkedUid || subData.uid || submissionId,
         employeeId: cleanEmpId,
         portalId: submissionId,
-        profileData: updatedProfileData,
-        data: updatedProfileData,
+        profileData: migratedProfileData,
+        data: migratedProfileData,
         currentSiteId: initialSiteId,
         siteName: (subData.formData && subData.formData.siteName) || 'N/A',
         activeAssignments: [initialAssignment],
@@ -4682,17 +4803,19 @@ exports.approveOnboardingServer = functions.https.onCall(async (request) => {
         profileCompletionStatus: profileCompletionData?.profileCompletionStatus === 'INCOMPLETE' ? 'INCOMPLETE' : 'COMPLETE',
         pendingProfileFields: profileCompletionData?.profileCompletionStatus === 'INCOMPLETE' ? (profileCompletionData?.pendingProfileFields || []) : [],
         pendingProfileNote: profileCompletionData?.profileCompletionStatus === 'INCOMPLETE' ? (profileCompletionData?.pendingProfileNote || '') : '',
-        aadhaarNumber: subData.aadhaarNumber || null,
-        panNumber: subData.panNumber || null,
-        uanNumber: subData.uanNumber || null,
-        phoneNumber: subData.phoneNumber || null,
+        aadhaarNumber: request.data.aadhaarNumber || subData.aadhaarNumber || null,
+        panNumber: request.data.panNumber || subData.panNumber || null,
+        uanNumber: request.data.uanNumber || subData.uanNumber || null,
+        phoneNumber: request.data.phoneNumber || subData.phoneNumber || null,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         lastUpdated: new Date().toISOString()
     };
 
-    if (subData.passwordHash) {
-        newEmployee.passwordHash = subData.passwordHash;
-        newEmployee.isDefaultPassword = subData.isDefaultPassword || false;
+    const resolvedPasswordHash = request.data.passwordHash || subData.passwordHash || null;
+    const resolvedIsDefaultPassword = request.data.isDefaultPassword !== undefined ? request.data.isDefaultPassword : (subData.isDefaultPassword || false);
+    if (resolvedPasswordHash) {
+        newEmployee.passwordHash = resolvedPasswordHash;
+        newEmployee.isDefaultPassword = resolvedIsDefaultPassword;
     }
 
     if (customRecruiter) {
@@ -4717,6 +4840,8 @@ exports.approveOnboardingServer = functions.https.onCall(async (request) => {
     const subUpdates = {
         status: 'Approved',
         employeeId: cleanEmpId,
+        formData: migratedProfileData,
+        data: migratedProfileData,
         driveFolderName: newFolderName,
         applicantName: employeeName,
         joiningDate: resolvedJoiningDate,
@@ -4763,7 +4888,7 @@ exports.approveOnboardingServer = functions.https.onCall(async (request) => {
         targetUserId: cleanEmpId,
         message: `Welcome to UDF! Your onboarding has been approved. Your Employee ID is ${cleanEmpId}.`,
         type: 'success',
-        link: '/employee/dashboard',
+        link: 'EMPLOYEE_DASHBOARD',
         read: false,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         timestamp: new Date().toISOString()
@@ -4893,7 +5018,7 @@ exports.relieveEmployeeServer = functions.https.onCall(async (request) => {
         targetUserId: empData.employeeId || empSnap.id,
         message: `Your employment has been relieved effective ${relievingDate}. Reason: ${cleanReason}.`,
         type: 'info',
-        link: '/employee/dashboard',
+        link: 'EMPLOYEE_DASHBOARD',
         read: false,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         timestamp: new Date().toISOString()
@@ -5056,7 +5181,7 @@ exports.rejoinEmployeeServer = functions.https.onCall(async (request) => {
             targetUserId: cleanNewId,
             message: `Welcome back to UDF! You have been rejoined as ${cleanNewId} at ${resolvedSiteName}.`,
             type: 'success',
-            link: '/employee/dashboard',
+            link: 'EMPLOYEE_DASHBOARD',
             read: false,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
             timestamp: new Date().toISOString()
@@ -5159,7 +5284,7 @@ exports.rejoinEmployeeServer = functions.https.onCall(async (request) => {
         targetUserId: origData.employeeId || origEmpSnap.id,
         message: `Welcome back to UDF! Your account has been reactivated at ${resolvedSiteName}.`,
         type: 'success',
-        link: '/employee/dashboard',
+        link: 'EMPLOYEE_DASHBOARD',
         read: false,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         timestamp: new Date().toISOString()
@@ -5312,7 +5437,13 @@ exports.completeTrainingQuizServer = functions.https.onCall(async (request) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // CLOUD-7: NATIVE GOOGLE DRIVE & GOOGLE SHEETS DIRECT INTEGRATION (googleapis)
 // ─────────────────────────────────────────────────────────────────────────────
-const { google } = require('googleapis');
+let _google = null;
+function getGoogle() {
+    if (!_google) {
+        _google = require('googleapis').google;
+    }
+    return _google;
+}
 const GOOGLE_FORM_MAPPING = require('./googleFormMapping');
 
 const ROOT_DRIVE_FOLDER_ID = "1XuFLT5v5s1ZSdugKr1XzT0AdYkL-QgBX";
@@ -5326,7 +5457,8 @@ const DRIVE_ROOT_FOLDERS = {
 };
 
 function getGoogleAuthClient() {
-    return new google.auth.GoogleAuth({
+    const GoogleAuth = getGoogle().auth.GoogleAuth;
+    return new GoogleAuth({
         scopes: [
             'https://www.googleapis.com/auth/drive',
             'https://www.googleapis.com/auth/drive.file',
@@ -5461,6 +5593,17 @@ async function syncRecordToDriveAndSheetsCore(recordId, explicitType) {
     }
 
     const recordData = targetSnap.data() || {};
+    if (recordData.driveBackupStatus === 'in_progress') {
+        console.log(`[CLOUD-7] Drive backup already in progress for ${recordId}, skipping duplicate invocation.`);
+        return { success: true, status: 'already_in_progress' };
+    }
+
+    // Mark in progress atomically to block concurrent duplicate executions
+    await targetDocRef.update({
+        driveBackupStatus: 'in_progress',
+        driveBackupStartedAt: new Date().toISOString()
+    });
+
     const applicantName = recordData.applicantName || recordData.name || (recordData.profileData && recordData.profileData.personalDetails && recordData.profileData.personalDetails.fullName) || 'Candidate';
     const folderId = recordData.employeeId || recordData.portalId || recordId;
     const formData = recordData.formData || recordData.profileData || recordData.data || {};
@@ -5497,7 +5640,7 @@ async function syncRecordToDriveAndSheetsCore(recordId, explicitType) {
     let joiningDocsFolderId = null;
     try {
         const auth = getGoogleAuthClient();
-        driveClient = google.drive({ version: 'v3', auth });
+        driveClient = getGoogle().drive({ version: 'v3', auth });
 
         // Find or create parent folder (Pending Employees vs Active Employees)
         const parentFolderName = isPending ? DRIVE_ROOT_FOLDERS.PENDING : DRIVE_ROOT_FOLDERS.ACTIVE;
@@ -5605,6 +5748,20 @@ async function syncRecordToDriveAndSheetsCore(recordId, explicitType) {
 async function appendSubmissionToSheetsServer(recordData, formData, driveFolderUrl) {
     const db = admin.firestore();
 
+    // 0. Idempotency guard: Prevent duplicate rows in Google Sheets
+    if (recordData.googleFormSyncStatus === 'synced' || recordData.googleFormSyncStatus === 'in_progress') {
+        console.log(`[appendSubmissionToSheetsServer] Already synced or in progress for record, skipping duplicate sheet row.`);
+        return 'already_synced';
+    }
+
+    const recDocId = recordData.portalId || recordData.employeeId || recordData.id;
+    if (recDocId) {
+        const collectionName = recordData.employeeId ? 'employees' : 'onboarding_submissions';
+        await db.collection(collectionName).doc(recDocId).update({
+            googleFormSyncStatus: 'in_progress'
+        }).catch(() => {});
+    }
+
     // 1. Check for configured Spreadsheet ID
     const portalConfigSnap = await db.collection('settings').doc('portal_config').get();
     const portalConfig = portalConfigSnap.exists ? portalConfigSnap.data() : {};
@@ -5681,7 +5838,7 @@ async function appendSubmissionToSheetsServer(recordData, formData, driveFolderU
     if (spreadsheetId) {
         try {
             const auth = getGoogleAuthClient();
-            const sheets = google.sheets({ version: 'v4', auth });
+            const sheets = getGoogle().sheets({ version: 'v4', auth });
 
             const row = [
                 new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
