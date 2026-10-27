@@ -81,7 +81,7 @@ const AdminStaffProfilePage: React.FC<AdminStaffProfilePageProps> = ({
         headcount: foHeadcount
       };
     });
-  }, [hasPermission, staffUsers, roles, sites, approvedEmployees]);
+  }, [hasPermission, staffUsers, roles, sites, siteHeadcounts]);
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
