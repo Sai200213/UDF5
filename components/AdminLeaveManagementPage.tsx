@@ -122,19 +122,13 @@ const AdminLeaveManagementPage: React.FC<AdminLeaveManagementPageProps> = ({
             };
             const shortKey = keyMap[type] || type.toLowerCase();
             const configType = leavePolicy?.leaveTypes?.find(lt => lt.label === type || lt.typeId === type);
-            const defaultQuota = configType?.defaultQuota || 12;
-            const total = selectedEmpRecord.leaveBalance?.[shortKey] !== undefined ? selectedEmpRecord.leaveBalance[shortKey] : defaultQuota;
-
-            let used = 0;
-            empLeaves.filter(r => r.leaveType === type).forEach(req => {
-                const s = new Date(req.startDate);
-                const e = new Date(req.endDate);
-                const days = Math.round((e.getTime() - s.getTime()) / (1000 * 60 * 60 * 24)) + 1;
-                used += (days > 0 ? days : 1);
-            });
+            const total = configType?.defaultQuota ?? 12;
+            const hasExplicitRemaining = selectedEmpRecord.leaveBalance?.[shortKey] !== undefined;
+            const remaining = hasExplicitRemaining ? Number(selectedEmpRecord.leaveBalance[shortKey]) : total;
+            const used = Math.max(0, total - remaining);
 
             if (type === LeaveType.UNPAID) return { total: '∞', used, remaining: '∞' };
-            return { total, used, remaining: Math.max(0, total - used) };
+            return { total, used, remaining: Math.max(0, remaining) };
         }
 
         const empBalance = leaveBalances.find(b => b.employeeId === employeeId);

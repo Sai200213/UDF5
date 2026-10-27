@@ -1241,7 +1241,7 @@ const App: React.FC = () => {
 
     const config = workflowConfigs.find(c => c.moduleId === 'LEAVES');
     const level1 = config?.levels.find(l => l.level === 1);
-    if (level1) notifyApprovers(userUniqueId, level1.roleId, `New Leave Request from ${authUser.name}`, AppView.ADMIN_PORTAL_LEAVE_MANAGEMENT);
+    if (level1) notifyApprovers(userUniqueId, level1.roleId, `New Leave Request from ${authUser.name}`, AppView.ADMIN_PORTAL_LEAVE_MANAGEMENT, newRequest.siteId);
     refreshGlobalStats();
   }, [authUser, employeeData, workflowConfigs, notifyApprovers, logSystemAction, refreshGlobalStats, checkWritesBlock]);
 
@@ -1276,7 +1276,7 @@ const App: React.FC = () => {
     logSystemAction('SUBMIT', 'EMPLOYEES', `Resignation request submitted.`);
     const config = workflowConfigs.find(c => c.moduleId === 'RESIGNATIONS');
     const level1 = config?.levels.find(l => l.level === 1);
-    if (level1) notifyApprovers(userUniqueId, level1.roleId, `New Resignation Request from ${authUser.name}`, AppView.ADMIN_PORTAL_RESIGNATION_MANAGEMENT);
+    if (level1) notifyApprovers(userUniqueId, level1.roleId, `New Resignation Request from ${authUser.name}`, AppView.ADMIN_PORTAL_RESIGNATION_MANAGEMENT, newRequest.siteId);
     refreshGlobalStats();
   }, [authUser, employeeData, sites, workflowConfigs, notifyApprovers, logSystemAction, refreshGlobalStats, checkWritesBlock]);
 
@@ -1396,7 +1396,7 @@ const App: React.FC = () => {
     await submitAccountUpdateRequest(newRequest);
     const config = workflowConfigs.find(c => c.moduleId === 'ACCOUNT_UPDATES');
     const level1 = config?.levels.find(l => l.level === 1);
-    if (level1) notifyApprovers(userUniqueId, level1.roleId, `New Account Update Request`, AppView.ADMIN_PORTAL_ACCOUNT_UPDATE_MANAGEMENT);
+    if (level1) notifyApprovers(userUniqueId, level1.roleId, `New Account Update Request`, AppView.ADMIN_PORTAL_ACCOUNT_UPDATE_MANAGEMENT, newRequest.siteId);
     refreshGlobalStats();
   }, [authUser, employeeData, workflowConfigs, notifyApprovers, logSystemAction, refreshGlobalStats, checkWritesBlock]);
 
