@@ -2891,6 +2891,7 @@ export const rejoinEmployee = async (
     };
 
     const updates: any = {
+        status: 'Active',
         isActive: true,
         isRelieved: false,
         isBlocked: false,
@@ -2921,6 +2922,8 @@ export const rejoinEmployee = async (
     const subSnap = await getDocs(subQuery);
     if (!subSnap.empty) {
         await updateDoc(subSnap.docs[0].ref, {
+            status: 'Approved',
+            isActive: true,
             isRelieved: false,
             relievingDate: deleteField(),
             relievingReason: deleteField()
