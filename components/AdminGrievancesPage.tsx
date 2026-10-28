@@ -363,7 +363,7 @@ const AdminGrievancesPage: React.FC<AdminGrievancesPageProps> = ({
     return (
         <div className="p-6 max-w-7xl mx-auto space-y-6">
             {/* Header */}
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-gray-200 pb-5">
+            <div className="border-b border-gray-200 pb-5 space-y-4">
                 <div>
                     <h1 className="text-2xl font-bold text-gray-900 tracking-tight flex items-center gap-2">
                         <MessageSquare className="h-7 w-7 text-indigo-600" />
@@ -374,12 +374,13 @@ const AdminGrievancesPage: React.FC<AdminGrievancesPageProps> = ({
                     </p>
                 </div>
 
-                {/* Sub-Tabs */}
-                <div className="flex bg-gray-100 p-1 rounded-xl border border-gray-200 overflow-x-auto">
+                {/* Sub-Tabs Bar: Full-width responsive pills, always visible with zero horizontal scroll */}
+                <div className="flex flex-wrap items-center gap-2 bg-gray-100 p-1.5 rounded-xl border border-gray-200 w-full sm:w-auto">
                     {canViewGrievances && (
                         <button
+                            type="button"
                             onClick={() => setActiveTab('grievances')}
-                            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all whitespace-nowrap ${
+                            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
                                 activeTab === 'grievances'
                                     ? 'bg-white text-indigo-700 shadow-sm'
                                     : 'text-gray-600 hover:text-gray-900'
@@ -396,8 +397,9 @@ const AdminGrievancesPage: React.FC<AdminGrievancesPageProps> = ({
                     )}
                     {canViewRewards && (
                         <button
+                            type="button"
                             onClick={() => setActiveTab('rewards')}
-                            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all whitespace-nowrap ${
+                            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
                                 activeTab === 'rewards'
                                     ? 'bg-white text-indigo-700 shadow-sm'
                                     : 'text-gray-600 hover:text-gray-900'
@@ -414,8 +416,9 @@ const AdminGrievancesPage: React.FC<AdminGrievancesPageProps> = ({
                     )}
                     {canViewInquiries && (
                         <button
+                            type="button"
                             onClick={() => setActiveTab('inquiries')}
-                            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all whitespace-nowrap ${
+                            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
                                 activeTab === 'inquiries'
                                     ? 'bg-white text-indigo-700 shadow-sm'
                                     : 'text-gray-600 hover:text-gray-900'
@@ -423,11 +426,15 @@ const AdminGrievancesPage: React.FC<AdminGrievancesPageProps> = ({
                         >
                             <Mail className="h-4 w-4" />
                             Business Contact Inquiries
-                            {inquiryStats.new > 0 && (
+                            {inquiryStats.new > 0 ? (
                                 <span className="bg-blue-600 text-white text-xs px-2 py-0.5 rounded-full font-bold">
-                                    {inquiryStats.new}
+                                    {inquiryStats.new} New
                                 </span>
-                            )}
+                            ) : inquiries.length > 0 ? (
+                                <span className="bg-gray-200 text-gray-700 text-xs px-2 py-0.5 rounded-full font-bold">
+                                    {inquiries.length}
+                                </span>
+                            ) : null}
                         </button>
                     )}
                 </div>

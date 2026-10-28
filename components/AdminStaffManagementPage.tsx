@@ -78,6 +78,7 @@ const AdminStaffManagementPage: React.FC<AdminStaffManagementPageProps> = ({
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
   const [staffToDelete, setStaffToDelete] = useState<string | null>(null);
   const [isCheckingLinks, setIsCheckingLinks] = useState(false);
+  const [permanentAuthPurge, setPermanentAuthPurge] = useState(false);
   interface DeleteLinks {
     sites: { id: string; name: string }[];
     employees: { id: string; name: string }[];
@@ -484,6 +485,7 @@ const AdminStaffManagementPage: React.FC<AdminStaffManagementPageProps> = ({
     }
 
     setStaffToDelete(id);
+    setPermanentAuthPurge(false);
     setIsCheckingLinks(true);
     setDeleteLinks({ sites: [], employees: [], submissions: [] });
     setIsConfirmModalOpen(true);
@@ -599,11 +601,20 @@ const AdminStaffManagementPage: React.FC<AdminStaffManagementPageProps> = ({
         }
       }
 
-      // 3. Disable account in staffService (preserve Auth account for Recycle Bin retention/restore)
-      try {
-        await setStaffUserStatus(staffToDelete, true);
-      } catch (cfErr: any) {
-        console.warn("setStaffUserStatus Cloud Function warning:", cfErr);
+      // 3. Handle Firebase Authentication user status or permanent purge
+      if (permanentAuthPurge) {
+        try {
+          await deleteStaffUser(staffToDelete);
+        } catch (authDelErr: any) {
+          console.warn("deleteStaffUser Cloud Function warning:", authDelErr);
+        }
+      } else {
+        // Disable account in staffService (preserve Auth account for Recycle Bin retention/restore)
+        try {
+          await setStaffUserStatus(staffToDelete, true);
+        } catch (cfErr: any) {
+          console.warn("setStaffUserStatus Cloud Function warning:", cfErr);
+        }
       }
 
       // Clean up active staff_accounts document so they don't appear in active staff list
@@ -614,20 +625,24 @@ const AdminStaffManagementPage: React.FC<AdminStaffManagementPageProps> = ({
       setStaffUsers(prev => prev.filter(s => s.id !== staffToDelete));
 
       if (logAction) {
-        logAction('DELETE', 'STAFF', `Moved staff account to Recycle Bin: ${staffName}`);
+        logAction('DELETE', 'STAFF', permanentAuthPurge ? `Permanently deleted staff user & Auth: ${staffName}` : `Moved staff account to Recycle Bin: ${staffName}`);
       }
 
-      // 4. Trigger Instant 10s Undo Toast
-      showUndoToast({
-        message: `Staff "${staffName}" moved to Recycle Bin`,
-        recycleBinId: binId,
-        onUndo: () => {
-          if (deletedStaffCopy) {
-            setStaffUsers(prev => [...prev.filter(s => s.id !== deletedStaffCopy.id), deletedStaffCopy]);
-            setStaffUserStatus(staffToDelete, false).catch(err => console.warn('Failed to re-enable staff Auth on undo:', err));
+      if (permanentAuthPurge) {
+        onNotify(`Staff account "${staffName}" deleted and email released from Authentication.`, 'success');
+      } else {
+        // 4. Trigger Instant 10s Undo Toast
+        showUndoToast({
+          message: `Staff "${staffName}" moved to Recycle Bin`,
+          recycleBinId: binId,
+          onUndo: () => {
+            if (deletedStaffCopy) {
+              setStaffUsers(prev => [...prev.filter(s => s.id !== deletedStaffCopy.id), deletedStaffCopy]);
+              setStaffUserStatus(staffToDelete, false).catch(err => console.warn('Failed to re-enable staff Auth on undo:', err));
+            }
           }
-        }
-      });
+        });
+      }
     } catch (err: any) {
       onNotify(err.message || "Failed to delete staff account", "error");
     } finally {
@@ -1454,7 +1469,7 @@ const AdminStaffManagementPage: React.FC<AdminStaffManagementPageProps> = ({
                     className="text-xs py-1.5 px-3"
                   >
                     {isLoading ? <Loader2 size={14} className="animate-spin mr-1" /> : <Trash2 size={14} className="mr-1" />}
-                    Delete to Recycle Bin (Keep Sites Safe)
+                    {permanentAuthPurge ? 'Permanently Delete (Release Email)' : 'Delete to Recycle Bin (Keep Sites Safe)'}
                   </Button>
                 </>
               )}
@@ -1465,7 +1480,7 @@ const AdminStaffManagementPage: React.FC<AdminStaffManagementPageProps> = ({
                   disabled={isLoading}
                 >
                   {isLoading ? <Loader2 size={14} className="animate-spin mr-1" /> : <Trash2 size={14} className="mr-1" />}
-                  Delete to Recycle Bin
+                  {permanentAuthPurge ? 'Permanently Delete (Release Email)' : 'Delete to Recycle Bin'}
                 </Button>
               )}
             </div>
@@ -1477,12 +1492,30 @@ const AdminStaffManagementPage: React.FC<AdminStaffManagementPageProps> = ({
                 <AlertTriangle size={20} />
               </div>
               <div>
-                <p className="text-gray-900 font-bold">Safe Recycle Bin Deletion</p>
+                <p className="text-gray-900 font-bold">Delete Staff Account</p>
                 <p className="text-gray-600 text-xs mt-1">
-                  Deleting will move this staff account to the <strong>Recycle Bin</strong> for 30 days. All client sites and employee profiles remain <strong>100% safe</strong> (sites will simply be marked as unassigned).
+                  Deleting will safely unassign this staff member while keeping all client sites and employee profiles <strong>100% intact</strong>.
                 </p>
               </div>
             </div>
+
+            {/* Permanent Auth Purge Checkbox */}
+            <label className="flex items-start gap-2.5 p-3 bg-red-50/80 border border-red-200 rounded-xl cursor-pointer hover:bg-red-50 transition-colors">
+              <input
+                type="checkbox"
+                checked={permanentAuthPurge}
+                onChange={e => setPermanentAuthPurge(e.target.checked)}
+                className="mt-0.5 h-4 w-4 text-red-600 rounded border-gray-300 focus:ring-red-500"
+              />
+              <div>
+                <span className="text-xs font-bold text-red-900 block">
+                  Permanently delete from Authentication & release email immediately
+                </span>
+                <span className="text-[11px] text-red-700 block mt-0.5">
+                  Check this if you plan to re-use this exact email address right now. (If unchecked, the account is archived in the Recycle Bin for 30 days and the email remains reserved).
+                </span>
+              </div>
+            </label>
 
             {/* Link Check Results */}
             {isCheckingLinks ? (
