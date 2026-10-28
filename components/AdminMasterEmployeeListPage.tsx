@@ -244,6 +244,17 @@ const AdminMasterEmployeeListPage: React.FC<AdminMasterEmployeeListPageProps> = 
     }
   }, []);
 
+  // Synchronize local table data immediately when an employee is purged or deleted
+  React.useEffect(() => {
+    const handleRecordDeleted = (e: any) => {
+      const { id, allIds } = e.detail || {};
+      const idSet = new Set([id, ...(allIds || [])].filter(Boolean));
+      setPaginatedData(prev => prev.filter(emp => !idSet.has(emp.id) && !idSet.has(emp.employeeId || '')));
+    };
+    window.addEventListener('udf:record-deleted', handleRecordDeleted);
+    return () => window.removeEventListener('udf:record-deleted', handleRecordDeleted);
+  }, []);
+
   const toggleColumnVisibility = useCallback((colId: string) => {
     setUserVisibleColumns(prev => {
       const next = new Set(prev);

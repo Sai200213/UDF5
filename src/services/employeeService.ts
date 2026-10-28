@@ -3581,105 +3581,122 @@ export const getEmployeeRecordCounts = async (target: string | EmployeeFullConte
     const allIds = ctx.allIds;
     const results: Record<string, number> = {};
 
-    // Helper to query unique doc IDs across multiple fields and multiple IDs
+    // Helper to query unique doc IDs across multiple fields and multiple IDs concurrently
     const countUniqueMatchingDocs = async (collectionName: string, fields: string[]): Promise<number> => {
         const foundDocIds = new Set<string>();
         try {
+            const queryPromises: Promise<any>[] = [];
             for (const f of fields) {
                 for (const id of allIds) {
                     const q = query(collection(db, collectionName), where(f, "==", id));
-                    const snap = await getDocs(q);
-                    snap.docs.forEach(d => foundDocIds.add(d.id));
+                    queryPromises.push(getDocs(q).then(snap => snap.docs.forEach(d => foundDocIds.add(d.id))).catch(() => {}));
                 }
             }
+            await Promise.all(queryPromises);
         } catch (e) {
             log.warn(`[getEmployeeRecordCounts] Error scanning ${collectionName}:`, e);
         }
         return foundDocIds.size;
     };
 
-    // 1. Leave Requests
-    results['Leaves'] = await countUniqueMatchingDocs(LEAVE_REQ_COL, ['employeeId', 'uid']);
+    // Run all 15 area checks in parallel for maximum speed
+    const [
+        leavesCount,
+        updatesCount,
+        resignationsCount,
+        disciplinaryCount,
+        leaveBalancesCount,
+        attendanceCount,
+        engagementCount,
+        complaintsCount,
+        rewardsCount,
+        bgvCount,
+        correctionsCount,
+        notificationsCount,
+        submissionsCount,
+        draftsCount
+    ] = await Promise.all([
+        // 1. Leave Requests
+        countUniqueMatchingDocs(LEAVE_REQ_COL, ['employeeId', 'uid']),
+        // 2. Account Updates
+        countUniqueMatchingDocs(ACCOUNT_UPD_COL, ['employeeId', 'uid']),
+        // 3. Resignations
+        countUniqueMatchingDocs(RESIGNATION_COL, ['employeeId', 'uid']),
+        // 4. Disciplinary Actions
+        countUniqueMatchingDocs(DISCIPLINARY_COL, ['employeeId', 'targetUserId', 'uid']),
+        // 5. Leave Balances
+        (async () => {
+            const balanceDocIds = new Set<string>();
+            const promises = allIds.flatMap(id => [
+                getDocs(query(collection(db, LEAVE_BALANCES_COL), where('employeeId', '==', id)))
+                    .then(snap => snap.docs.forEach(d => balanceDocIds.add(d.id))).catch(() => {}),
+                getDoc(doc(db, LEAVE_BALANCES_COL, id))
+                    .then(d => { if (d.exists()) balanceDocIds.add(d.id); }).catch(() => {})
+            ]);
+            await Promise.all(promises);
+            return balanceDocIds.size;
+        })(),
+        // 6. Attendance
+        countUniqueMatchingDocs('attendance', ['userId', 'employeeId']),
+        // 7. User Engagement & Streaks
+        (async () => {
+            const engDocIds = new Set<string>();
+            const promises = allIds.flatMap(id => [
+                getDocs(query(collection(db, 'user_engagement'), where('userId', '==', id)))
+                    .then(snap => snap.docs.forEach(d => engDocIds.add(d.id))).catch(() => {}),
+                getDoc(doc(db, 'user_engagement', id))
+                    .then(d => { if (d.exists()) engDocIds.add(d.id); }).catch(() => {})
+            ]);
+            await Promise.all(promises);
+            return engDocIds.size;
+        })(),
+        // 8. Complaints & Grievances
+        countUniqueMatchingDocs('complaints', ['userId', 'employeeId']),
+        // 9. Reward Redemptions
+        countUniqueMatchingDocs('reward_redemptions', ['userId', 'employeeId']),
+        // 10. Background Checks (BGV)
+        countUniqueMatchingDocs('bgv_records', ['employeeId', 'targetId']),
+        // 11. Correction Requests
+        countUniqueMatchingDocs('correction_requests', ['targetId', 'submissionId']),
+        // 12. Notifications
+        countUniqueMatchingDocs(NOTIFICATIONS_COL, ['targetUserId']),
+        // 13. Onboarding Submissions
+        (async () => {
+            if (ctx.submissionId) return 1;
+            return countUniqueMatchingDocs(SUBMISSIONS_COLLECTION, ['employeeId', 'linkedUid']);
+        })(),
+        // 14. Application Drafts
+        (async () => {
+            const draftDocIds = new Set<string>();
+            const promises = allIds.map(id =>
+                getDocs(query(collection(db, DRAFTS_COLLECTION), where('ownerUid', '==', id)))
+                    .then(snap => snap.docs.forEach(d => draftDocIds.add(d.id))).catch(() => {})
+            );
+            if (ctx.email) {
+                promises.push(
+                    getDocs(query(collection(db, DRAFTS_COLLECTION), where('ownerEmail', '==', ctx.email)))
+                        .then(snap => snap.docs.forEach(d => draftDocIds.add(d.id))).catch(() => {})
+                );
+            }
+            await Promise.all(promises);
+            return draftDocIds.size;
+        })()
+    ]);
 
-    // 2. Account Updates
-    results['Account Updates'] = await countUniqueMatchingDocs(ACCOUNT_UPD_COL, ['employeeId', 'uid']);
-
-    // 3. Resignations
-    results['Resignations'] = await countUniqueMatchingDocs(RESIGNATION_COL, ['employeeId', 'uid']);
-
-    // 4. Disciplinary Actions
-    results['Disciplinary'] = await countUniqueMatchingDocs(DISCIPLINARY_COL, ['employeeId', 'targetUserId', 'uid']);
-
-    // 5. Leave Balances
-    const balanceDocIds = new Set<string>();
-    for (const id of allIds) {
-        try {
-            const q = query(collection(db, LEAVE_BALANCES_COL), where('employeeId', '==', id));
-            const snap = await getDocs(q);
-            snap.docs.forEach(d => balanceDocIds.add(d.id));
-            const directDoc = await getDoc(doc(db, LEAVE_BALANCES_COL, id));
-            if (directDoc.exists()) balanceDocIds.add(directDoc.id);
-        } catch {}
-    }
-    results['Leave Balances'] = balanceDocIds.size;
-
-    // 6. Attendance
-    results['Attendance'] = await countUniqueMatchingDocs('attendance', ['userId', 'employeeId']);
-
-    // 7. User Engagement & Streaks
-    const engDocIds = new Set<string>();
-    for (const id of allIds) {
-        try {
-            const q = query(collection(db, 'user_engagement'), where('userId', '==', id));
-            const snap = await getDocs(q);
-            snap.docs.forEach(d => engDocIds.add(d.id));
-            const directDoc = await getDoc(doc(db, 'user_engagement', id));
-            if (directDoc.exists()) engDocIds.add(directDoc.id);
-        } catch {}
-    }
-    results['Engagement & Streaks'] = engDocIds.size;
-
-    // 8. Complaints & Grievances
-    results['Complaints & Grievances'] = await countUniqueMatchingDocs('complaints', ['userId', 'employeeId']);
-
-    // 9. Reward Redemptions
-    results['Reward Redemptions'] = await countUniqueMatchingDocs('reward_redemptions', ['userId', 'employeeId']);
-
-    // 10. Background Checks (BGV)
-    results['Background Checks (BGV)'] = await countUniqueMatchingDocs('bgv_records', ['employeeId', 'targetId']);
-
-    // 11. Correction Requests
-    results['Correction Requests'] = await countUniqueMatchingDocs('correction_requests', ['targetId', 'submissionId']);
-
-    // 12. Notifications
-    results['Notifications'] = await countUniqueMatchingDocs(NOTIFICATIONS_COL, ['targetUserId']);
-
-    // 13. Onboarding Submissions
-    let subCount = 0;
-    if (ctx.submissionId) subCount = 1;
-    else {
-        subCount = await countUniqueMatchingDocs(SUBMISSIONS_COLLECTION, ['employeeId', 'linkedUid']);
-    }
-    results['Onboarding Submissions'] = subCount;
-
-    // 14. Application Drafts
-    const draftDocIds = new Set<string>();
-    for (const id of allIds) {
-        try {
-            const q = query(collection(db, DRAFTS_COLLECTION), where('ownerUid', '==', id));
-            const snap = await getDocs(q);
-            snap.docs.forEach(d => draftDocIds.add(d.id));
-        } catch {}
-    }
-    if (ctx.email) {
-        try {
-            const q = query(collection(db, DRAFTS_COLLECTION), where('ownerEmail', '==', ctx.email));
-            const snap = await getDocs(q);
-            snap.docs.forEach(d => draftDocIds.add(d.id));
-        } catch {}
-    }
-    results['Application Drafts'] = draftDocIds.size;
-
+    results['Leaves'] = leavesCount;
+    results['Account Updates'] = updatesCount;
+    results['Resignations'] = resignationsCount;
+    results['Disciplinary'] = disciplinaryCount;
+    results['Leave Balances'] = leaveBalancesCount;
+    results['Attendance'] = attendanceCount;
+    results['Engagement & Streaks'] = engagementCount;
+    results['Complaints & Grievances'] = complaintsCount;
+    results['Reward Redemptions'] = rewardsCount;
+    results['Background Checks (BGV)'] = bgvCount;
+    results['Correction Requests'] = correctionsCount;
+    results['Notifications'] = notificationsCount;
+    results['Onboarding Submissions'] = submissionsCount;
+    results['Application Drafts'] = draftsCount;
     // 15. Google Drive Folder
     results['Google Drive Folder'] = ctx.driveFolderName ? 1 : 0;
 

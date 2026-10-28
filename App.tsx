@@ -18,7 +18,7 @@ import { getApplicantName } from './utils/formDataHelper';
 import Button from './components/common/Button';
 import Input from './components/common/Input';
 import Modal from './components/common/Modal';
-import { ArrowLeft, ShieldAlert, ChevronRight, RotateCcw, Trash2 } from 'lucide-react';
+import { ArrowLeft, ShieldAlert, ChevronRight, RotateCcw, Trash2, Loader2, Lock, ShieldCheck } from 'lucide-react';
 import { useFormBuilder } from './hooks/useFormBuilder';
 import {
   defaultRoles,
@@ -356,6 +356,8 @@ const App: React.FC = () => {
   // --- INTERACTIVE DELETION STATE ---
   const [deletionSummary, setDeletionSummary] = useState<{ id: string, name: string, counts: Record<string, number>, context?: EmployeeFullContext } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [scanLoading, setScanLoading] = useState<{ isScanning: boolean; name?: string; targetId?: string } | null>(null);
 
   // CRITICAL: Ref-based state tracking to prevent stale closures in async firestore handlers
   const sectionsRef = React.useRef<FormSection[]>(formSections);
@@ -1662,14 +1664,12 @@ const App: React.FC = () => {
 
 
   const handleDeleteSubmission = useCallback(async (id: string) => {
+    setScanLoading({ isScanning: true, targetId: id, name: 'Employee' });
     try {
       // 1. Resolve full employee identity across employee records, submissions, auth UIDs, and emails
       const context = await resolveEmployeeFullContext(id);
 
-      // 2. Comprehensive scan across all 15 operational and relational areas
-      const counts = await getEmployeeRecordCounts(context);
-
-      // 3. Fallback name if context didn't resolve one
+      // 2. Fallback name if context didn't resolve one
       let name = context.applicantName;
       if (!name || name === 'Unknown') {
         const sub = submittedForms.find(s => s.employeeId === id || s.id === id);
@@ -1679,7 +1679,12 @@ const App: React.FC = () => {
           name = id;
         }
       }
+      setScanLoading({ isScanning: true, targetId: id, name });
 
+      // 3. Comprehensive scan across all 15 operational and relational areas (optimized parallel execution)
+      const counts = await getEmployeeRecordCounts(context);
+
+      setScanLoading(null);
       setDeletionSummary({
         id: context.employeeId || id,
         name,
@@ -1687,6 +1692,7 @@ const App: React.FC = () => {
         context
       });
     } catch (error: any) {
+      setScanLoading(null);
       log.error('[handleDeleteSubmission] Error scanning employee context:', error);
       alert(`Scan Failed: ${error.message}`);
     }
@@ -1694,6 +1700,40 @@ const App: React.FC = () => {
 
   const handleConfirmDeletion = async (deep: boolean) => {
     if (!deletionSummary) return;
+
+    if (deep) {
+      // Dual Authentication: Require Google Re-Authentication for permanent Deep Purge
+      setIsAuthenticating(true);
+      try {
+        const { auth } = await import('./src/firebase/config');
+        const { GoogleAuthProvider, signInWithPopup } = await import('firebase/auth');
+
+        if (!auth.currentUser) {
+          throw new Error("You must be signed in with your administrator account to authorize Deep Purge.");
+        }
+
+        const provider = new GoogleAuthProvider();
+        provider.setCustomParameters({ prompt: 'select_account' });
+
+        const result = await signInWithPopup(auth, provider);
+        const signedInEmail = (result.user.email || '').toLowerCase().trim();
+        const activeEmail = (auth.currentUser.email || authUser?.email || '').toLowerCase().trim();
+
+        if (signedInEmail && activeEmail && signedInEmail !== activeEmail) {
+          throw new Error(`Account mismatch: Re-authentication used "${signedInEmail}", but current admin session is logged in as "${activeEmail}".`);
+        }
+      } catch (authErr: any) {
+        setIsAuthenticating(false);
+        if (authErr.code === 'auth/popup-closed-by-user' || authErr.code === 'auth/cancelled-popup-request') {
+          return; // User voluntarily cancelled Google re-auth
+        }
+        alert(`Google Re-Authentication Failed: ${authErr.message || 'Authorization is required for Deep Purge.'}`);
+        return;
+      } finally {
+        setIsAuthenticating(false);
+      }
+    }
+
     setIsDeleting(true);
     try {
       const { id, name, context } = deletionSummary;
@@ -1710,7 +1750,10 @@ const App: React.FC = () => {
       setSubmittedForms(prev => prev.filter(s => !idsToRemove.has(s.id) && !(s.employeeId && idsToRemove.has(s.employeeId))));
       setEmployees(prev => prev.filter(e => !idsToRemove.has(e.id) && !(e.employeeId && idsToRemove.has(e.employeeId))));
 
-      logSystemAction('DELETE', 'EMPLOYEES', `${deep ? 'Deep purge' : 'Standard deletion'} of ${name} (${targetId})`);
+      // Immediately notify all active table views (e.g. Master Employee List) to purge rows from local state
+      window.dispatchEvent(new CustomEvent('udf:record-deleted', { detail: { id: targetId, allIds: Array.from(idsToRemove) } }));
+
+      logSystemAction('DELETE', 'EMPLOYEES', `${deep ? 'Deep purge (Google Authenticated)' : 'Standard deletion'} of ${name} (${targetId})`);
       sendNotification(authUser?.id || 'admin', `${name} has been ${deep ? 'fully purged' : 'deleted'}.`, 'success');
       setDeletionSummary(null);
       refreshGlobalStats();
@@ -2513,23 +2556,62 @@ const App: React.FC = () => {
               </button>
 
               <button
-                disabled={isDeleting}
+                disabled={isDeleting || isAuthenticating}
                 onClick={() => handleConfirmDeletion(true)}
-                className="w-full flex items-center justify-between p-4 rounded-xl border border-red-100 bg-red-50 hover:bg-red-100 transition-all group"
+                className="w-full flex items-center justify-between p-4 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 transition-all group relative overflow-hidden"
               >
                 <div className="text-left">
-                  <p className="font-bold text-red-800">Deep Purge (Wipe All Traces)</p>
-                  <p className="text-xs text-red-600">Deletes everything above AND Drive folder, Submissions, etc.</p>
+                  <div className="flex items-center gap-2">
+                    <p className="font-bold text-red-800">Deep Purge (Wipe All Traces)</p>
+                    <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700 px-2 py-0.5 rounded-full border border-red-200">
+                      <Lock size={10} /> Google Re-Auth
+                    </span>
+                  </div>
+                  <p className="text-xs text-red-600 mt-0.5">Deletes everything above AND Drive folder, Submissions, etc.</p>
                 </div>
-                {isDeleting ? <RotateCcw className="animate-spin text-red-600" size={20} /> : <Trash2 className="text-red-400 group-hover:text-red-600" size={20} />}
+                {isAuthenticating ? (
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-red-700 animate-pulse">
+                    <RotateCcw className="animate-spin text-red-600" size={18} />
+                    <span>Authorizing...</span>
+                  </div>
+                ) : isDeleting ? (
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-red-700">
+                    <RotateCcw className="animate-spin text-red-600" size={18} />
+                    <span>Purging...</span>
+                  </div>
+                ) : (
+                  <Trash2 className="text-red-400 group-hover:text-red-600 transition-colors" size={20} />
+                )}
               </button>
             </div>
 
             <div className="flex justify-center pt-2">
-              <button onClick={() => setDeletionSummary(null)} className="text-xs font-bold text-gray-400 hover:text-gray-600 uppercase tracking-widest">Cancel Action</button>
+              <button onClick={() => setDeletionSummary(null)} disabled={isDeleting || isAuthenticating} className="text-xs font-bold text-gray-400 hover:text-gray-600 uppercase tracking-widest disabled:opacity-50">Cancel Action</button>
             </div>
           </div>
         </Modal>
+      )}
+
+      {/* Screen-Locking Scan Loader (Prevents tab hopping while auditing 15 systems) */}
+      {scanLoading?.isScanning && (
+        <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-[99999] flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full text-center space-y-4 border border-slate-100 animate-in zoom-in-95 duration-150">
+            <div className="w-16 h-16 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mx-auto shadow-inner">
+              <ShieldAlert size={32} className="animate-pulse" />
+            </div>
+            <div>
+              <h3 className="text-base font-black text-slate-800">Auditing Linked Records</h3>
+              <p className="text-xs font-bold text-blue-600 mt-1 truncate px-2">{scanLoading.name}</p>
+              <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
+                Scanning across 15 operational systems (Leaves, Attendance, Drive files, Statutory records)...
+              </p>
+            </div>
+            <div className="flex items-center justify-center gap-2 text-xs font-bold text-slate-600 bg-slate-50 py-2.5 px-3 rounded-xl border border-slate-100">
+              <Loader2 className="animate-spin text-blue-600" size={16} />
+              <span>Analyzing links, please wait...</span>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
