@@ -154,8 +154,7 @@ service cloud.firestore {
     // ─── Contact Us Inquiries ────────────────────────────────────────────────
     match /contact_messages/{id} {
       allow create: if request.resource.data.name is string && request.resource.data.name.size() > 0;
-      allow read, delete: if isAdmin();
-      allow update: if false;
+      allow read, update, delete: if isAdmin();
     }
 
     // ─── Admin / Super-Admin Accounts ───────────────────────────────────────

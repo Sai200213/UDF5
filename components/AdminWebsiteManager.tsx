@@ -17,7 +17,7 @@ const getFormattedImageUrl = (url?: string) => {
 };
 
 const AdminWebsiteManager: React.FC<{ isSuperAdmin: boolean; userRole?: any }> = ({ isSuperAdmin, userRole }) => {
-    const [activeTab, setActiveTab] = useState<'blogs' | 'about_services' | 'contact_careers' | 'grievances' | 'attendance' | 'quizzes' | 'rewards_rules' | 'usage_billing'>('blogs');
+    const [activeTab, setActiveTab] = useState<'blogs' | 'about_services' | 'contact_careers' | 'attendance' | 'quizzes' | 'rewards_rules' | 'usage_billing'>('blogs');
     const [webConfig, setWebConfig] = useState<WebsiteServiceData | null>(null);
 
     // Usage & Billing States
@@ -82,13 +82,6 @@ const AdminWebsiteManager: React.FC<{ isSuperAdmin: boolean; userRole?: any }> =
     const [blogIsPrivate, setBlogIsPrivate] = useState(false);
     const [blogEditMode, setBlogEditMode] = useState<'write' | 'preview'>('write');
 
-    // Grievances State
-    const [grievances, setGrievances] = useState<any[]>([]);
-    const [selectedGrievance, setSelectedGrievance] = useState<any | null>(null);
-    const [isResolveModalOpen, setIsResolveModalOpen] = useState(false);
-    const [adminResponseText, setAdminResponseText] = useState('');
-    const [resolutionStatus, setResolutionStatus] = useState('Resolved');
-
     // Attendance State
     const [attendanceRecords, setAttendanceRecords] = useState<any[]>([]);
     const [searchQuery, setSearchQuery] = useState('');
@@ -130,7 +123,6 @@ const AdminWebsiteManager: React.FC<{ isSuperAdmin: boolean; userRole?: any }> =
             setPosts(blogs);
 
             await Promise.all([
-                loadGrievances(),
                 loadAttendanceRecords(),
                 loadQuizzes(),
                 loadRules()
@@ -139,16 +131,6 @@ const AdminWebsiteManager: React.FC<{ isSuperAdmin: boolean; userRole?: any }> =
             console.error("Failed to load admin website config:", err);
         } finally {
             setLoading(false);
-        }
-    };
-
-    const loadGrievances = async () => {
-        try {
-            const snap = await getDocs(query(collection(db, 'complaints'), orderBy('timestamp', 'desc')));
-            const list = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            setGrievances(list);
-        } catch (err) {
-            console.error("Failed to load grievances:", err);
         }
     };
 
@@ -189,29 +171,6 @@ const AdminWebsiteManager: React.FC<{ isSuperAdmin: boolean; userRole?: any }> =
             }
         } catch (err) {
             console.error("Failed to load point rules:", err);
-        }
-    };
-
-    const handleResolveSubmit = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!selectedGrievance) return;
-        setSaving(true);
-        try {
-            const ref = doc(db, 'complaints', selectedGrievance.id);
-            await updateDoc(ref, {
-                status: resolutionStatus,
-                adminResponse: adminResponseText.trim(),
-                resolvedAt: new Date().toISOString()
-            });
-            setMessage('Grievance updated successfully!');
-            await loadGrievances();
-            setIsResolveModalOpen(false);
-            setTimeout(() => setMessage(''), 3000);
-        } catch (err) {
-            console.error("Failed to resolve grievance:", err);
-            alert("Failed to save resolution");
-        } finally {
-            setSaving(false);
         }
     };
 
@@ -559,14 +518,6 @@ const AdminWebsiteManager: React.FC<{ isSuperAdmin: boolean; userRole?: any }> =
                     }`}
                 >
                     Contact & Careers
-                </button>
-                <button
-                    onClick={() => setActiveTab('grievances')}
-                    className={`pb-3 px-5 text-sm font-bold whitespace-nowrap border-b-2 transition-all ${
-                        activeTab === 'grievances' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'
-                    }`}
-                >
-                    Grievances
                 </button>
                 <button
                     onClick={() => setActiveTab('attendance')}
@@ -921,74 +872,7 @@ const AdminWebsiteManager: React.FC<{ isSuperAdmin: boolean; userRole?: any }> =
                 </div>
             )}
 
-            {/* Tab 4: Grievances */}
-            {activeTab === 'grievances' && (
-                <div className="bg-white border rounded-2xl p-6 shadow-2xs">
-                    <div className="mb-6">
-                        <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
-                            <MessageSquare className="text-blue-600 h-5 w-5" /> Grievance Desk
-                        </h3>
-                        <p className="text-xs text-slate-500 mt-0.5">Review and resolve issues submitted by field officers.</p>
-                    </div>
-
-                    <div className="overflow-x-auto">
-                        <table className="min-w-full text-left text-xs border-collapse">
-                            <thead>
-                                <tr className="border-b bg-slate-50 text-slate-500 font-bold uppercase tracking-wider">
-                                    <th className="p-3">Date</th>
-                                    <th className="p-3">Employee Name</th>
-                                    <th className="p-3">Grievance Description</th>
-                                    <th className="p-3">Status</th>
-                                    <th className="p-3">Admin Action</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {grievances.length === 0 ? (
-                                    <tr>
-                                        <td colSpan={5} className="p-8 text-center text-slate-400">No grievances found.</td>
-                                    </tr>
-                                ) : (
-                                    grievances.map((g) => (
-                                        <tr key={g.id} className="border-b hover:bg-slate-50/50">
-                                            <td className="p-3 text-slate-500 font-semibold whitespace-nowrap">
-                                                {g.timestamp ? new Date(g.timestamp.seconds * 1000).toLocaleDateString() : 'N/A'}
-                                            </td>
-                                            <td className="p-3 font-bold text-slate-800">{g.userName || 'Employee'} (ID: {g.userId})</td>
-                                            <td className="p-3 text-slate-600 max-w-sm break-words">{g.text}</td>
-                                            <td className="p-3">
-                                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                                    g.status === 'Resolved' ? 'bg-green-50 text-green-700' :
-                                                    g.status === 'Investigating' ? 'bg-yellow-50 text-yellow-700' : 'bg-red-50 text-red-700'
-                                                }`}>
-                                                    {g.status || 'Pending'}
-                                                </span>
-                                            </td>
-                                            <td className="p-3 space-y-1">
-                                                <button
-                                                    onClick={() => {
-                                                        setSelectedGrievance(g);
-                                                        setAdminResponseText(g.adminResponse || '');
-                                                        setResolutionStatus(g.status || 'Resolved');
-                                                        setIsResolveModalOpen(true);
-                                                    }}
-                                                    className="bg-blue-50 text-blue-600 hover:bg-blue-100 font-bold px-3 py-1.5 rounded-lg text-[10px] transition-colors"
-                                                >
-                                                    Update Status
-                                                </button>
-                                                {g.adminResponse && (
-                                                    <p className="text-[10px] text-slate-400 italic max-w-xs truncate">Resp: {g.adminResponse}</p>
-                                                )}
-                                            </td>
-                                        </tr>
-                                    ))
-                                )}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            )}
-
-            {/* Tab 5: Attendance Logs */}
+            {/* Attendance Logs */}
             {activeTab === 'attendance' && (
                 <div className="bg-white border rounded-2xl p-6 shadow-2xs">
                     <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
@@ -1553,79 +1437,6 @@ const AdminWebsiteManager: React.FC<{ isSuperAdmin: boolean; userRole?: any }> =
                                 {portalConfig?.manualReadOnly ? 'Disable Read-Only Mode' : 'Enable Read-Only Mode'}
                             </button>
                         </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Grievance Resolution Modal */}
-            {isResolveModalOpen && selectedGrievance && (
-                <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
-                    <div className="bg-white rounded-3xl p-6 max-w-md w-full border border-slate-100 shadow-xl space-y-4 animate-in zoom-in-95 duration-200">
-                        <div className="flex justify-between items-center border-b pb-3">
-                            <h3 className="text-sm font-extrabold text-slate-800">Resolve Grievance</h3>
-                            <button
-                                type="button"
-                                onClick={() => setIsResolveModalOpen(false)}
-                                className="text-slate-400 hover:text-slate-650 transition-colors"
-                            >
-                                <X size={20} />
-                            </button>
-                        </div>
-
-                        <div className="space-y-3 text-xs bg-slate-50 p-4 border rounded-2xl">
-                            <div>
-                                <span className="font-extrabold text-slate-700 block">Submitted By:</span>
-                                <span className="text-slate-600 font-semibold">{selectedGrievance.userName} (ID: {selectedGrievance.userId})</span>
-                            </div>
-                            <div>
-                                <span className="font-extrabold text-slate-700 block">Grievance Description:</span>
-                                <p className="text-slate-600 leading-relaxed font-semibold">{selectedGrievance.text}</p>
-                            </div>
-                        </div>
-
-                        <form onSubmit={handleResolveSubmit} className="space-y-4">
-                            <div>
-                                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Status</label>
-                                <select
-                                    value={resolutionStatus}
-                                    onChange={(e) => setResolutionStatus(e.target.value)}
-                                    className="w-full px-3 py-2 text-xs border rounded-xl bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 font-bold"
-                                >
-                                    <option value="Pending">Pending</option>
-                                    <option value="Investigating">Investigating</option>
-                                    <option value="Resolved">Resolved</option>
-                                </select>
-                            </div>
-
-                            <div>
-                                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Admin Response Note</label>
-                                <textarea
-                                    value={adminResponseText}
-                                    onChange={(e) => setAdminResponseText(e.target.value)}
-                                    rows={4}
-                                    required
-                                    placeholder="Type response, action taken, or comments for the employee..."
-                                    className="w-full px-3 py-2 text-xs border rounded-xl bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-650 font-semibold"
-                                />
-                            </div>
-
-                            <div className="flex justify-end gap-3 pt-3 border-t">
-                                <button
-                                    type="button"
-                                    onClick={() => setIsResolveModalOpen(false)}
-                                    className="px-5 py-2.5 rounded-xl border text-slate-600 text-xs font-bold hover:bg-slate-50"
-                                >
-                                    Cancel
-                                </button>
-                                <button
-                                    type="submit"
-                                    disabled={saving}
-                                    className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-6 rounded-xl text-xs transition-all shadow-xs"
-                                >
-                                    {saving ? 'Saving...' : 'Update Grievance'}
-                                </button>
-                            </div>
-                        </form>
                     </div>
                 </div>
             )}

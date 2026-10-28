@@ -360,8 +360,8 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
     }
   }, [notifications]);
 
-  const canSeeModule = (p1: Permission, p2?: Permission) => {
-    return hasPermission(p1) || (p2 ? hasPermission(p2) : false);
+  const canSeeModule = (...permissions: (Permission | undefined)[]) => {
+    return permissions.some(p => p && hasPermission(p));
   };
 
   const navStructure: NavItem[] = useMemo(() => [
@@ -382,7 +382,7 @@ const AdminPortalPage: React.FC<AdminPortalPageProps> = (props) => {
         { id: AppView.ADMIN_PORTAL_DISCIPLINARY_MANAGEMENT, view: AppView.ADMIN_PORTAL_DISCIPLINARY_MANAGEMENT, label: 'Disciplinary Actions', icon: <Gavel size={18} />, visible: canSeeModule(Permission.MANAGE_DISCIPLINE, Permission.VIEW_DISCIPLINE) },
         { id: AppView.ADMIN_PORTAL_DRAFTS, view: AppView.ADMIN_PORTAL_DRAFTS, label: 'Onboarding Drafts', icon: <FileClock size={18} />, visible: hasPermission(Permission.SUBMISSIONS_VIEW_DRAFTS) },
         { id: AppView.ADMIN_PORTAL_CORRECTION_REQUESTS, view: AppView.ADMIN_PORTAL_CORRECTION_REQUESTS, label: 'Correction Links', icon: <Link2 size={18} />, visible: isSuperAdmin || hasPermission(Permission.SUBMISSIONS_VIEW_CORRECTION_LINKS) },
-        { id: AppView.ADMIN_PORTAL_GRIEVANCES, view: AppView.ADMIN_PORTAL_GRIEVANCES, label: 'Grievances & Care', icon: <MessageSquare size={18} />, visible: isSuperAdmin || hasPermission(Permission.GRIEVANCES_VIEW) || hasPermission(Permission.REWARDS_VIEW) || hasPermission(Permission.REWARDS_MANAGE) },
+        { id: AppView.ADMIN_PORTAL_GRIEVANCES, view: AppView.ADMIN_PORTAL_GRIEVANCES, label: 'Grievances & Inquiries', icon: <MessageSquare size={18} />, visible: isSuperAdmin || hasPermission(Permission.GRIEVANCES_VIEW) || hasPermission(Permission.REWARDS_VIEW) || hasPermission(Permission.REWARDS_MANAGE) },
       ]
     },
 

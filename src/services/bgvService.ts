@@ -14,6 +14,7 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { BgvRecord, BgvStatus, FirestoreEmployee, Site, FormSection } from '../../types';
 import { autoCompressFile, uploadFile } from './storageService';
 import { logSystemAction } from './auditService';
+import log from '../utils/logger';
 
 const BGV_COLLECTION = 'bgv_records';
 

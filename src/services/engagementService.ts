@@ -309,7 +309,7 @@ export const submitComplaint = async (
                 const { resolveEmployeeDoc } = await import('./employeeService');
                 const emp = await resolveEmployeeDoc(userId);
                 if (emp?.data) {
-                    finalSiteId = emp.data.currentSiteId || emp.data.siteId || '';
+                    finalSiteId = emp.data.currentSiteId || (emp.data as any).siteId || '';
                     finalSiteName = emp.data.siteName || '';
                 }
             } catch (_) {}
@@ -467,4 +467,66 @@ export const updateRewardRedemptionStatus = async (
         return false;
     }
 };
+
+// 7. BUSINESS CONTACT INQUIRIES SERVICES
+export interface ContactInquiryItem {
+    id: string;
+    name: string;
+    email: string;
+    phone: string;
+    subject?: string;
+    message: string;
+    timestamp: any;
+    status?: 'new' | 'contacted' | 'closed';
+    notes?: string;
+    updatedAt?: any;
+    updatedBy?: string;
+}
+
+export const subscribeToContactInquiries = (callback: (inquiries: ContactInquiryItem[]) => void): (() => void) => {
+    const q = query(collection(db, 'contact_messages'), orderBy('timestamp', 'desc'));
+    return onSnapshot(q, (snapshot) => {
+        const inquiries: ContactInquiryItem[] = snapshot.docs.map(d => ({
+            id: d.id,
+            status: d.data().status || 'new',
+            ...(d.data() as Omit<ContactInquiryItem, 'id' | 'status'>)
+        }));
+        callback(inquiries);
+    }, (error) => {
+        log.error('Error in contact inquiries subscription:', error);
+    });
+};
+
+export const updateContactInquiryStatus = async (
+    inquiryId: string,
+    status: 'new' | 'contacted' | 'closed',
+    notes?: string,
+    updatedBy?: string
+): Promise<boolean> => {
+    try {
+        const docRef = doc(db, 'contact_messages', inquiryId);
+        const updates: any = {
+            status,
+            updatedAt: serverTimestamp()
+        };
+        if (notes !== undefined) updates.notes = notes;
+        if (updatedBy) updates.updatedBy = updatedBy;
+        await updateDoc(docRef, updates);
+        return true;
+    } catch (error) {
+        log.error('Error updating contact inquiry status:', error);
+        return false;
+    }
+};
+
+export const deleteContactInquiry = async (inquiryId: string): Promise<boolean> => {
+    try {
+        await deleteDoc(doc(db, 'contact_messages', inquiryId));
+        return true;
+    } catch (error) {
+        log.error('Error deleting contact inquiry:', error);
+        return false;
+    }
+};
+
 
