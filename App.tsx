@@ -149,6 +149,10 @@ export const ADMIN_TAB_SLUGS: Record<string, AppView> = {
   'bgv': AppView.ADMIN_PORTAL_BGV_MANAGEMENT,
   'grievances': AppView.ADMIN_PORTAL_GRIEVANCES,
   'recycle-bin': AppView.ADMIN_PORTAL_RECYCLE_BIN,
+  'modules': AppView.ADMIN_PORTAL_PORTAL_MODULES,
+  'portal-modules': AppView.ADMIN_PORTAL_PORTAL_MODULES,
+  'client-ids': AppView.ADMIN_PORTAL_CLIENT_ID_LIBRARY,
+  'client-id-library': AppView.ADMIN_PORTAL_CLIENT_ID_LIBRARY,
 };
 
 export const SLUG_BY_ADMIN_VIEW: Record<string, string> = Object.entries(ADMIN_TAB_SLUGS).reduce(
