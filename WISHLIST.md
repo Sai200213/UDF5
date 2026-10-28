@@ -1,4 +1,4 @@
-﻿# UDF Portal — Master Feature Wishlist & Future Roadmap
+# UDF Portal — Master Feature Wishlist & Future Roadmap
 
 This file tracks all approved, user-wishlisted enterprise features and enhancements for future phases.
 
@@ -61,3 +61,13 @@ This file tracks all approved, user-wishlisted enterprise features and enhanceme
 * **Category:** Scalability & Database Performance
 * **Description:** 
   - Extend the existing startAfter cursor pagination from AdminMasterEmployeeListPage into secondary archive tabs (Disciplinary Actions, Inactive Referral Invites) when historical records exceed 5,000+ entries.
+
+---
+
+### 8. Single-Container Cloud API & Zero-Trust Database Isolation (Google Cloud Run + Fastify + SSE)
+* **Category:** Advanced Cloud Architecture & Database Hardening
+* **Description:** 
+  - **Single-Container Architecture:** Package backend logic into a single, high-performance Node.js / Fastify container hosted on **Google Cloud Run** to eliminate micro-function sprawl and leverage Google's 2,000,000 free monthly requests and Startup CPU Boost (<300ms startup).
+  - **Zero-Trust Database Lockdown:** Transition `firestore.rules` to complete lockdown (`allow read, write: if false;`), rendering the entire Firestore database invisible and untouchable to browser clients, accessible exclusively via authenticated Cloud Run API endpoints using master service account credentials.
+  - **Server-Sent Events (SSE) Real-Time Bus:** Replace direct browser `onSnapshot` subscriptions with native HTTP Server-Sent Events (`EventSource`) to provide instantaneous live dashboard updates at near-zero infrastructure cost (avoiding expensive 24/7 WebSocket server clusters).
+  - **Phased Migration Strategy:** Mount existing `functions/index.js` endpoints inside an Express/Fastify router on Cloud Run as a secondary backend, then migrate frontend service modules incrementally (Vacancies → Leaves → Staff → Master Employees) with zero operational downtime.
