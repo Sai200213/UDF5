@@ -96,3 +96,4 @@ All non-wishlisted / rejected features (such as automated HR offer letter genera
 5. **Side-by-Side Split-Screen OCR Diff Highlighting:** Visual field-vs-KYC card comparison in `AdminReviewSubmissionsPage`.
 6. **Client & Facility Headcount Portal:** Restricted read-only portal for client facility managers to view deployed guards and verified BGV badges at their site.
 7. **Phase 2 Full Server-Side Cursor Pagination for Secondary Tabs (`IMP-8`):** Extend `startAfter` cursor pagination from `AdminMasterEmployeeListPage` into secondary archive tabs when historical records exceed 5,000+ entries.
+
