@@ -11,10 +11,7 @@ interface ImportMetaEnv {
     readonly VITE_FIREBASE_APP_ID: string;
     readonly VITE_FIREBASE_MEASUREMENT_ID: string;
     // App Services
-    readonly VITE_GOOGLE_DRIVE_SCRIPT_URL: string;
     readonly VITE_GOOGLE_CLIENT_ID: string;
-    // Feature Flags
-    readonly VITE_ENABLE_DRIVE_SYNC: string;
 }
 
 interface ImportMeta {

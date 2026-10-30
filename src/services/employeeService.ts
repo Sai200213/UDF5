@@ -1067,7 +1067,7 @@ export const submitEmployeeForm = async (
 };
 
 export const syncSubmissionToGoogleForm = async (submissionId: string): Promise<{ success: boolean; error?: string }> => {
-    // 1. CLOUD-7: Execute server-side googleapis Sheets / Form sync
+    // CLOUD-7: Execute server-side googleapis Sheets / Form sync via Cloud Function
     try {
         log.log(`[FORM_SYNC] Calling syncSubmissionToSheetsServer for ${submissionId}...`);
         const syncFormFn = httpsCallable<{ submissionId: string }, { success: boolean; status?: string }>(functions, 'syncSubmissionToSheetsServer');
@@ -1075,61 +1075,15 @@ export const syncSubmissionToGoogleForm = async (submissionId: string): Promise<
         log.log(`[FORM_SYNC] ✅ Server-side sync completed:`, res.data);
         return { success: true };
     } catch (serverErr: any) {
-        console.warn(`[FORM_SYNC] Server-side Form sync failed, executing client fallback:`, serverErr?.message || serverErr);
-    }
-
-    // 2. Client fallback
-    try {
-        const subDocRef = doc(db, SUBMISSIONS_COLLECTION, submissionId);
-        const snap = await getDoc(subDocRef);
-        if (!snap.exists()) {
-            throw new Error(`Submission ${submissionId} not found.`);
-        }
-        const data = snap.data() as any;
-        const formData = data.formData || data.data || {};
-        
-        // Comprehensive Candidate Email Extraction
-        let email: string | null = data.linkedGoogleEmail || data.email || null;
-        if (!email && formData && typeof formData === 'object') {
-            if (formData.email && typeof formData.email === 'string' && formData.email.includes('@')) {
-                email = formData.email.trim();
-            } else if (formData.personalEmail && typeof formData.personalEmail === 'string' && formData.personalEmail.includes('@')) {
-                email = formData.personalEmail.trim();
-            } else if (formData.applicantEmail && typeof formData.applicantEmail === 'string' && formData.applicantEmail.includes('@')) {
-                email = formData.applicantEmail.trim();
-            } else {
-                for (const val of Object.values(formData)) {
-                    if (typeof val === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val.trim())) {
-                        email = val.trim();
-                        break;
-                    }
-                }
-            }
-        }
-
-        const formPayload = {
-            ...formData,
-            siteName: data.siteName || formData.siteName
-        };
-
-        await submitToGoogleForm(formPayload, email);
-
-        await updateDoc(subDocRef, {
-            googleFormSyncStatus: 'synced',
-            googleFormSyncedAt: new Date().toISOString()
-        });
-
-        return { success: true };
-    } catch (err: any) {
-        console.error("Manual Google Form sync failed:", err);
+        console.error(`[FORM_SYNC] Server-side Form sync failed:`, serverErr?.message || serverErr);
         try {
             const subDocRef = doc(db, SUBMISSIONS_COLLECTION, submissionId);
             await updateDoc(subDocRef, {
                 googleFormSyncStatus: 'failed',
-                googleFormSyncError: err.message || 'Manual sync failed'
+                googleFormSyncError: serverErr?.message || 'Server sync failed'
             });
-        } catch (e) {}
-        return { success: false, error: err.message };
+        } catch (_) {}
+        return { success: false, error: serverErr?.message || 'Server sync failed' };
     }
 };
 
@@ -3200,7 +3154,7 @@ export const updateEmployeeRecruiter = async (
 };
 
 export const syncDriveFolder = async (recordId: string) => {
-    // 1. CLOUD-7: Execute server-side googleapis Drive & Sheets sync
+    // CLOUD-7: Execute server-side googleapis Drive & Sheets sync via Cloud Function
     try {
         log.log(`[DRIVE_SYNC] Calling syncEmployeeToGoogleDriveServer for ${recordId}...`);
         const syncDriveFn = httpsCallable<{ recordId: string; targetType?: string }, { success: boolean; count: number; folderUrl?: string; driveUrls?: Record<string, string> }>(functions, 'syncEmployeeToGoogleDriveServer');
@@ -3208,126 +3162,9 @@ export const syncDriveFolder = async (recordId: string) => {
         log.log(`[DRIVE_SYNC] ✅ Server-side Drive sync completed:`, res.data);
         return { success: true, count: res.data?.count || 0, folderUrl: res.data?.folderUrl };
     } catch (serverErr: any) {
-        console.warn(`[DRIVE_SYNC] Server-side Drive sync failed, executing client fallback:`, serverErr?.message || serverErr);
+        console.error(`[DRIVE_SYNC] Server-side Drive sync failed:`, serverErr?.message || serverErr);
+        throw serverErr;
     }
-
-    // 2. Client fallback
-    let targetDocRef = doc(db, EMPLOYEES_COLLECTION, recordId);
-    let targetSnap = await getDoc(targetDocRef);
-    let isEmployee = true;
-
-    if (!targetSnap.exists()) {
-        targetDocRef = doc(db, SUBMISSIONS_COLLECTION, recordId);
-        targetSnap = await getDoc(targetDocRef);
-        isEmployee = false;
-        if (!targetSnap.exists()) {
-            throw new Error(`Record ${recordId} not found in Employees or Submissions.`);
-        }
-    }
-
-    const recordData = targetSnap.data() as any;
-    const applicantName = recordData.applicantName || recordData.name || (recordData.profileData?.personalDetails?.fullName) || 'Unknown';
-    const folderId = recordData.employeeId || recordData.portalId || recordId;
-    const formData = recordData.formData || recordData.profileData || recordData.data || {};
-
-    log.log(`[DRIVE_BACKUP] Starting Drive backup for ${applicantName} (${folderId})...`);
-
-    // Collect all Storage paths from form data
-    const storagePaths: { field: string; path: string }[] = [];
-    const extractPaths = (obj: any, prefix = '') => {
-        if (!obj || typeof obj !== 'object') return;
-        for (const key of Object.keys(obj)) {
-            const val = obj[key];
-            if (typeof val === 'string' && (val.startsWith('onboarding/') || val.startsWith('employees/'))) {
-                storagePaths.push({ field: prefix ? `${prefix}.${key}` : key, path: val });
-            } else if (typeof val === 'object' && val !== null) {
-                if ('storagePath' in val && typeof val.storagePath === 'string') {
-                    storagePaths.push({ field: prefix ? `${prefix}.${key}` : key, path: val.storagePath });
-                } else {
-                    extractPaths(val, prefix ? `${prefix}.${key}` : key);
-                }
-            }
-        }
-    };
-    extractPaths(formData);
-
-    const { uploadToDrive, submitToGoogleForm } = await import('./driveService');
-
-    const updatedFormData = { ...formData };
-    let uploadedCount = 0;
-    for (const item of storagePaths) {
-        try {
-            const blob = await getSecureBlob(item.path);
-            const fileName = item.path.split('/').pop() || 'document.pdf';
-            const fileObj = new File([blob], fileName, { type: blob.type });
-            const driveUrl = await uploadToDrive(fileObj, applicantName, "Joining Documents", folderId);
-            uploadedCount++;
-
-            // Save Drive URL in form data
-            if (updatedFormData[item.field] && typeof updatedFormData[item.field] === 'object') {
-                updatedFormData[item.field] = {
-                    ...updatedFormData[item.field],
-                    driveUrl: driveUrl || ''
-                };
-            } else {
-                updatedFormData[item.field] = {
-                    storagePath: item.path,
-                    driveUrl: driveUrl || ''
-                };
-            }
-            log.log(`[DRIVE_BACKUP] ✅ Uploaded ${fileName} to Drive for ${applicantName} (${driveUrl})`);
-        } catch (fileErr) {
-            console.warn(`[DRIVE_BACKUP] Warning uploading ${item.path} to Drive:`, fileErr);
-        }
-    }
-
-    const updatePayload: any = {
-        driveBackupStatus: 'completed',
-        driveBackupAt: new Date().toISOString()
-    };
-    if (isEmployee) {
-        updatePayload.data = updatedFormData;
-    } else {
-        updatePayload.formData = updatedFormData;
-    }
-    await updateDoc(targetDocRef, updatePayload);
-
-    log.log(`[DRIVE_BACKUP] Backup completed (${uploadedCount}/${storagePaths.length} files backed up to Google Drive).`);
-
-    // Chained step: Now that Drive URLs exist, sync to Google Form / Sheet with Drive URLs & Site Name
-    try {
-        let email: string | null = recordData.linkedGoogleEmail || recordData.email || null;
-        if (!email && updatedFormData && typeof updatedFormData === 'object') {
-            if (updatedFormData.email && typeof updatedFormData.email === 'string' && updatedFormData.email.includes('@')) {
-                email = updatedFormData.email.trim();
-            } else if (updatedFormData.personalEmail && typeof updatedFormData.personalEmail === 'string' && updatedFormData.personalEmail.includes('@')) {
-                email = updatedFormData.personalEmail.trim();
-            } else if (updatedFormData.applicantEmail && typeof updatedFormData.applicantEmail === 'string' && updatedFormData.applicantEmail.includes('@')) {
-                email = updatedFormData.applicantEmail.trim();
-            } else {
-                for (const val of Object.values(updatedFormData)) {
-                    if (typeof val === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val.trim())) {
-                        email = val.trim();
-                        break;
-                    }
-                }
-            }
-        }
-        const formPayload = {
-            ...updatedFormData,
-            siteName: recordData.siteName || updatedFormData.siteName
-        };
-        await submitToGoogleForm(formPayload, email);
-        await updateDoc(targetDocRef, {
-            googleFormSyncStatus: 'synced',
-            googleFormSyncedAt: new Date().toISOString()
-        });
-        log.log(`[GOOGLE_FORM] ✅ Synced Google Form with Drive URLs for ${applicantName}`);
-    } catch (formErr) {
-        console.warn(`[GOOGLE_FORM] Google Form sync error after Drive backup:`, formErr);
-    }
-
-    return { success: true, count: uploadedCount };
 };
 
 export interface EmployeeFullContext {
