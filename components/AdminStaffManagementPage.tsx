@@ -534,20 +534,23 @@ const AdminStaffManagementPage: React.FC<AdminStaffManagementPageProps> = ({
     const staffName = staffObj?.name || 'Unknown';
     setIsLoading(true);
     try {
-      // 1. Move staff user snapshot to Universal Recycle Bin first
-      const binId = await moveToRecycleBin({
-        itemType: 'STAFF',
-        name: staffName,
-        originalId: staffToDelete,
-        originalCollection: 'staff_accounts',
-        data: staffObj || { id: staffToDelete, name: staffName },
-        deletedByUid: loggedInUserId,
-        deletedByName: 'Super Admin',
-        metadata: {
-          linkedSites: deleteLinks.sites.map(s => s.id),
-          linkedEmployeesCount: deleteLinks.employees.length
-        }
-      });
+      // 1. Move staff user snapshot to Universal Recycle Bin first (only when not permanently purging)
+      let binId = '';
+      if (!permanentAuthPurge) {
+        binId = await moveToRecycleBin({
+          itemType: 'STAFF',
+          name: staffName,
+          originalId: staffToDelete,
+          originalCollection: 'staff_accounts',
+          data: staffObj || { id: staffToDelete, name: staffName },
+          deletedByUid: loggedInUserId,
+          deletedByName: 'Super Admin',
+          metadata: {
+            linkedSites: deleteLinks.sites.map(s => s.id),
+            linkedEmployeesCount: deleteLinks.employees.length
+          }
+        });
+      }
 
       // 2. Safely unassign links so sites and employees are NEVER destroyed
       if (deleteLinks.sites.length > 0) {
